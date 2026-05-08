@@ -1,0 +1,6 @@
+question_id,doc_id,question,answer,question_type,gold_node_ids,gold_pages,gold_modalities,evidence_note
+Q001,sample_rag_report,系统为什么需要在初步检索后做重排序？,因为传统文本切块检索可能召回相似段落但没有把关键表格或图表排在前面，需要通过重排序提升关键证据位置。,文本事实,T_sample_rag_report_1_1,1,text,答案来自第 1 页正文。
+Q002,sample_rag_report,G0 到 G3 四组方法分别是什么？,G0 是原始排序，G1 是 Sim，G2 是 Sim+PPR，G3 是 Sim+PPR+Bridge。,表格问答,TB_sample_rag_report_2_1,2,table,答案来自第 2 页表 1。
+Q003,sample_rag_report,最终融合公式默认使用哪组三个权重？,默认权重为 0.6、0.25、0.15。,文本事实,T_sample_rag_report_2_2,2,text,答案来自第 2 页公式说明。
+Q004,sample_rag_report,示例结果中 G3 的 Recall@5 是多少？,G3 的 Recall@5 是 0.80。,表格问答,TB_sample_rag_report_3_1,3,table,答案来自第 3 页表 2。
+Q005,sample_rag_report,图 2 的成功案例说明哪个节点排名发生了什么变化？,表格节点从 G0 的第 6 名上升到 G3 的第 2 名。,图表理解,F_sample_rag_report_3_1,3,figure,答案来自第 3 页图 2。

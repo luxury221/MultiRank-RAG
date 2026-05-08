@@ -1,0 +1,15 @@
+{"node_id":"P_sample_rag_report_1","doc_id":"sample_rag_report","page":1,"node_type":"page","content":"示例报告第 1 页：复杂文档问答研究背景与方法概览。","source_ref":"sample_rag_report page 1"}
+{"node_id":"T_sample_rag_report_1_1","doc_id":"sample_rag_report","page":1,"node_type":"text","content":"复杂 PDF 文档通常同时包含正文、表格、图表和图注。传统文本切块检索容易只召回相似段落，却没有把关键表格或图表排在前面。","source_ref":"第 1 页 正文"}
+{"node_id":"T_sample_rag_report_1_2","doc_id":"sample_rag_report","page":1,"node_type":"text","content":"本系统的目标是在初步检索得到候选证据后，引入查询感知 Personalized PageRank 和 Bridge 分数，对候选节点进行二次重排序。","source_ref":"第 1 页 方法目标"}
+{"node_id":"C_sample_rag_report_1_1","doc_id":"sample_rag_report","page":1,"node_type":"caption","content":"图 1：复杂文档证据图由文本、表格、图表、图注和页面节点组成。","source_ref":"第 1 页 图 1 图注"}
+{"node_id":"F_sample_rag_report_1_1","doc_id":"sample_rag_report","page":1,"node_type":"figure","content":"图 1 展示证据图结构：问题首先召回 Top-K 节点，随后在节点图上传播查询相关重要性。","source_ref":"第 1 页 图 1"}
+{"node_id":"P_sample_rag_report_2","doc_id":"sample_rag_report","page":2,"node_type":"page","content":"示例报告第 2 页：四组方法和核心公式。","source_ref":"sample_rag_report page 2"}
+{"node_id":"T_sample_rag_report_2_1","doc_id":"sample_rag_report","page":2,"node_type":"text","content":"实验设置包含四组方法：G0 保留原始召回顺序，G1 只按照语义相似度排序，G2 融合语义相似度与查询感知 PPR，G3 在 G2 基础上加入 Bridge 跨模态桥接分数。","source_ref":"第 2 页 实验设置"}
+{"node_id":"T_sample_rag_report_2_2","doc_id":"sample_rag_report","page":2,"node_type":"text","content":"最终融合公式为 Score(v|q)=lambda_s*Sim(q,v)+lambda_p*PPR_q(v)+lambda_b*Bridge(v|q)，默认权重为 0.6、0.25、0.15。","source_ref":"第 2 页 公式"}
+{"node_id":"C_sample_rag_report_2_1","doc_id":"sample_rag_report","page":2,"node_type":"caption","content":"表 1：G0 到 G3 的方法对比。","source_ref":"第 2 页 表 1 表注"}
+{"node_id":"TB_sample_rag_report_2_1","doc_id":"sample_rag_report","page":2,"node_type":"table","content":"表 1 方法对比：G0 原始排序；G1 Sim；G2 Sim+PPR；G3 Sim+PPR+Bridge。G3 关注跨模态桥接证据。","source_ref":"第 2 页 表 1"}
+{"node_id":"P_sample_rag_report_3","doc_id":"sample_rag_report","page":3,"node_type":"page","content":"示例报告第 3 页：实验指标与样例结果。","source_ref":"sample_rag_report page 3"}
+{"node_id":"T_sample_rag_report_3_1","doc_id":"sample_rag_report","page":3,"node_type":"text","content":"评价指标包括 Recall@K、MRR、nDCG@5、Evidence Hit Rate、Modality Hit Rate、Citation Accuracy 和 Rerank Time。","source_ref":"第 3 页 指标说明"}
+{"node_id":"C_sample_rag_report_3_1","doc_id":"sample_rag_report","page":3,"node_type":"caption","content":"表 2：小规模示例结果显示 G3 在表格题和图文一致性题上提升更明显。","source_ref":"第 3 页 表 2 表注"}
+{"node_id":"TB_sample_rag_report_3_1","doc_id":"sample_rag_report","page":3,"node_type":"table","content":"表 2 指标结果：G0 Recall@5=0.60，G1 Recall@5=0.65，G2 Recall@5=0.72，G3 Recall@5=0.80；G3 的 MRR 为 0.71。","source_ref":"第 3 页 表 2"}
+{"node_id":"F_sample_rag_report_3_1","doc_id":"sample_rag_report","page":3,"node_type":"figure","content":"图 2 展示一个成功案例：表格节点原本在 G0 中排名第 6，加入 PPR 和 Bridge 后在 G3 中上升到第 2。","source_ref":"第 3 页 图 2"}

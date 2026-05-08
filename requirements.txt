@@ -1,0 +1,13 @@
+networkx
+fastapi
+openai
+pandas
+pillow
+python-multipart
+scikit-learn
+streamlit
+pypdf
+pdfplumber
+pymupdf
+sentence-transformers
+uvicorn

@@ -1,0 +1,75 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.secret
+.streamlit/secrets.toml
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+ENV/
+conda-meta/
+
+# Node / React frontend
+node_modules/
+web/node_modules/
+web/dist/
+web/.vite/
+web/public/app-data.json
+web/public/outputs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Generated RAG outputs
+outputs/
+!outputs/.gitkeep
+*.npz
+*.npy
+*.pt
+*.pth
+*.safetensors
+
+# User documents, uploaded PDFs, and binary office files
+data/pdfs/*.pdf
+data/pdfs/**/*.pdf
+data/uploads/
+*.docx
+*.pptx
+*.xlsx
+~$*
+
+# Local cloned dependencies / external repositories
+external/
+
+# Logs and runtime files
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE/editor metadata
+.idea/
+.vscode/
+*.code-workspace
+
+# Windows downloaded-file metadata
+*:Zone.Identifier
