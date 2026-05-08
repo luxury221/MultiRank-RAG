@@ -1,180 +1,385 @@
 # 多模态 RAG 证据链检测系统
 
-一个面向复杂 PDF 文档问答的多模态 RAG 原型系统。项目将 PDF 解析为文本、表格、图片、图注和页面节点，结合 embedding 检索、图结构重排序、视觉 grounding 和证据链生成，最终在 Web 页面中展示横版证据卡片和按相关性排序的证据节点。
+本项目实现了一个面向复杂 PDF 文档问答的多模态 RAG 证据链检测系统。系统不仅返回答案相关证据，还会展示证据来自哪一页、哪一个文本块/表格/图像节点，以及这些证据之间如何通过图结构组成一条可解释的证据链。
 
-项目既支持系统预置 PDF 的离线评测，也支持用户在页面中上传 PDF 并输入自定义问题，由后端动态生成证据链和证据卡片。
+核心目标是验证一种“查询感知的多模态证据重排序与证据链展示”流程：将 PDF 拆解为多模态节点，构建文档证据图，结合 embedding 检索、图结构信号、引用关系和视觉 grounding，生成最终的 G4 排序结果与横版证据卡片。
 
-## 核心功能
-
-- PDF 多模态节点构建：文本块、表格、图片、图注、页面节点。
-- 视觉证据定位：为节点生成页面截图和局部裁剪图。
-- 混合检索：支持 lexical、embedding、hybrid 三种召回和重排序方式。
-- 图结构增强：基于同页关系、页面归属、正文引用表格/图片、图注关系构建 evidence graph。
-- G0-G4 对比：从原始召回、语义重排、PPR、Bridge 到视觉增强 G4 排序。
-- 证据链生成：自动组织主证据、图邻居、显式引用、图表证据、视觉补充等角色。
-- 横版证据卡片：生成 1920 x 1080 的证据链卡片，适合展示和汇报。
-- Web UI：上传 PDF 或选择系统 PDF，选择问题后查看证据卡片与证据相关性排序。
-- FastAPI 后端：支持上传 PDF 后在线解析、检索、重排、生成证据链和证据卡片。
-
-## 系统架构
+## 技术流程
 
 ```text
-PDF
+PDF 文档
   |
   v
-PDF parsing
-  -> text/table/figure/caption/page nodes
-  -> page images and evidence crops
+解析与切分
+  -> page 节点
+  -> text 节点
+  -> table 节点
+  -> figure 节点
+  -> caption 节点
   |
   v
-Evidence graph
+视觉 grounding
+  -> 页面截图
+  -> 节点 bbox
+  -> 局部证据裁剪图
+  -> 可选 VLM caption / qa_evidence
+  |
+  v
+证据图构建
   -> same_page
   -> belongs_to_page
-  -> text_ref_table / text_ref_figure
   -> table_caption / figure_caption
+  -> text_ref_table / text_ref_figure
   |
   v
-Retrieval and reranking
-  -> G0 candidate retrieval
-  -> G1 semantic ranking
-  -> G2 semantic + PPR
-  -> G3 semantic + PPR + bridge/reference
-  -> G4 visual grounded reranking
+候选召回与重排序
+  -> G0 原始候选
+  -> G1 语义相似度
+  -> G2 语义 + PPR
+  -> G3 语义 + PPR + Bridge + 引用
+  -> G4 G3 + 视觉 grounding
   |
   v
-Evidence chain and evidence card
+证据链生成
+  -> 主证据
+  -> 显式引用证据
+  -> 图表证据
+  -> 图邻居证据
+  -> 视觉补充证据
   |
   v
-React frontend + FastAPI backend
+横版证据卡片 + Web 展示
 ```
 
-## 目录结构
+## PDF 解析与 Chunk 实现
+
+解析入口位于 `scripts/01_parse_pdf.py`。
+
+系统支持两种来源：
+
+- 直接解析 PDF。
+- 接入 RAG-Anything/MinerU 导出的 `content_list` JSON。
+
+直接解析 PDF 时，系统会依次尝试：
+
+1. `pypdf`
+2. `PyPDF2`
+3. `PyMuPDF`
+4. `pdfplumber`
+5. `pdftotext`
+
+每一页都会先生成一个 `page` 节点，然后对页面文本进行 chunk。
+
+Chunk 逻辑：
+
+- 优先按空行切分段落。
+- 如果段落结构不足，则按行累积。
+- 默认 `chunk_size=900`。
+- 当累积文本长度达到阈值，或检测到图注/表注模式时，形成一个 chunk。
+- 超长 chunk 会继续按句子边界拆分。
+
+节点类型判断：
+
+- 匹配 `Figure/Fig./图` 等图注模式时，生成 `caption` 节点，并额外推断 `figure` 节点。
+- 匹配 `Table/表` 等表注模式时，生成 `caption` 节点，并额外推断 `table` 节点。
+- 包含多行数字、分隔符、表格提示词时，推断为 `table`。
+- 其他内容默认为 `text`。
+
+节点基础字段：
 
 ```text
-backend/
-  app.py                         # FastAPI 后端，负责上传 PDF 动态分析
-
-web/
-  src/                           # React 前端源码
-  public/                        # 前端静态数据和图片资源，构建前由脚本生成
-  package.json
-  vite.config.ts
-
-scripts/
-  01_parse_pdf.py                # PDF/content_list 解析为节点
-  02_build_graph.py              # 构建证据图
-  03_retrieve_candidates.py      # 候选证据召回
-  04_rerank.py                   # G0-G4 重排序
-  05_evaluate.py                 # 指标评测
-  06_run_pipeline.py             # 一键运行离线流水线
-  09_build_evidence_chains.py    # 构建证据链
-  10_build_visual_evidence.py    # 页面截图、裁剪图、可选 VLM caption
-  11_build_evidence_cards.py     # 生成横版证据卡片
-  12_check_evidence_cards.py     # 检查证据卡片质量
-  13_export_frontend_data.py     # 导出前端 app-data.json 和图片资源
-  embedding_index.py             # embedding 索引与缓存
-  rerank_lib.py                  # 检索、重排序、图信号核心逻辑
-
-data/
-  questions.csv                  # 系统预置问题
-  manual_nodes.csv               # 可选人工补充节点
-  pdfs/                          # PDF 原文，默认不提交到 GitHub
-
-outputs/                         # 运行结果，默认不提交到 GitHub
+node_id, doc_id, page, node_type, content, source_ref
 ```
 
-## 环境准备
-
-建议使用 Python 3.10 或以上版本。GPU 环境可加速 embedding，但不是强制要求。
-
-```bash
-pip install -r requirements.txt
-```
-
-前端依赖：
-
-```bash
-cd web
-npm install
-```
-
-本项目默认使用 `BAAI/bge-m3` 作为 embedding 模型。可通过环境变量修改：
-
-```bash
-export RAG_EMBEDDING_MODEL=BAAI/bge-m3
-export RAG_EMBEDDING_DEVICE=auto
-```
-
-Windows PowerShell 示例：
-
-```powershell
-$env:RAG_EMBEDDING_MODEL="BAAI/bge-m3"
-$env:RAG_EMBEDDING_DEVICE="auto"
-```
-
-## 快速运行 Web 系统
-
-### 1. 启动后端
-
-通用命令：
-
-```bash
-python -m uvicorn backend.app:app --host 127.0.0.1 --port 8765
-```
-
-如果使用本项目调试时的 GPU conda 环境：
-
-```powershell
-D:\conda_envs\rag-gpu\python.exe -m uvicorn backend.app:app --host 127.0.0.1 --port 8765
-```
-
-后端健康检查：
+视觉增强后会补充：
 
 ```text
-http://127.0.0.1:8765/api/health
+page_image_path, crop_image_path, bbox, bbox_source,
+visual_summary, visual_caption, visual_title, qa_evidence
 ```
 
-### 2. 生成前端数据
+## 视觉 Grounding 实现
 
-如果要展示系统预置 PDF 和问题的已有结果，需要先导出前端数据：
+视觉证据构建位于 `scripts/10_build_visual_evidence.py`。
 
-```bash
-python scripts/13_export_frontend_data.py
-```
+系统使用 `PyMuPDF` 对 PDF 页面进行渲染，生成：
 
-### 3. 构建并启动前端
+- 整页截图：`outputs/visual/pages/`
+- 节点裁剪图：`outputs/visual/crops/`
 
-```bash
-cd web
-npm run build
-cd dist
-python -m http.server 5174 --bind 127.0.0.1
-```
+裁剪定位逻辑：
 
-访问页面：
+- 对文本节点，使用页面 text block 与节点文本做相似匹配，找到最佳文本块 bbox。
+- 对图注节点，寻找附近 image block，合并图注和图片区域。
+- 对表格节点，寻找图注附近的表格样式文本区域。
+- 如果是视觉节点但无法精确匹配，则选择页面中较大的 image block 或投影区域。
+
+裁剪图并不是装饰图片，而是证据链里的 grounding 依据。后续 G4 排序和证据卡片都会使用这些裁剪图。
+
+视觉 caption 可选：
+
+- 默认本地流程只生成裁剪图和 `visual_summary`。
+- 可接入 Qwen-VL 或豆包 Ark，对裁剪图生成结构化视觉描述。
+- 结构化字段包括 `visual_title`、`visual_type`、`key_objects`、`data_or_trends`、`qa_evidence`、`limitations`。
+
+## Embedding 与向量索引
+
+Embedding 实现在 `scripts/embedding_index.py`。
+
+默认模型：
 
 ```text
-http://127.0.0.1:5174/
+BAAI/bge-m3
 ```
 
-## 页面使用方式
+可通过环境变量修改：
 
-首页分为两种入口：
+```text
+RAG_EMBEDDING_MODEL
+RAG_EMBEDDING_DEVICE
+RAG_EMBEDDING_BATCH_SIZE
+```
 
-1. 上传本地 PDF  
-   用户选择 PDF 后输入自定义问题，前端调用后端 API。后端会动态完成 PDF 解析、证据检索、G4 重排序、证据链构建和横版证据卡片生成。
+节点 embedding 文本格式：
 
-2. 选择系统 PDF  
-   用户选择项目预置文档后，页面显示该文档对应的预设问题。选择问题后展示已经离线生成的证据卡片和证据排序结果。
+```text
+node_type
+content
+```
 
-证据展示页为上下结构：
+也就是说，模型不仅看到 chunk 内容，还会看到该节点是文本、表格、图像还是图注。
 
-- 上方：横版证据卡片，展示问题、答案、证据链和视觉裁剪。
-- 下方：证据相关性排序，从高到低展示证据节点、页码、节点类型、裁剪图和相关性分数。
+当前项目没有接入 Milvus、FAISS、Chroma 这类独立向量数据库，而是实现了一个轻量级本地向量索引：
 
-## 上传 PDF API
+- 使用 `sentence-transformers` 编码节点。
+- embedding 使用 L2-normalized 向量。
+- 查询时编码问题，与所有节点 embedding 做矩阵乘法得到相似度。
+- embedding 缓存为 `.npz` 文件，存储在 `outputs/embeddings/`。
+- 缓存 key 由模型名、节点内容 hash、node_id 序列共同决定。
 
-后端主要接口：
+这种实现更适合课程项目和小规模实验：可复现、依赖少、容易解释。后续如果数据规模变大，可以将 `EmbeddingIndex` 替换为 FAISS、Milvus 或 Qdrant。
+
+## 候选召回
+
+候选召回位于 `scripts/03_retrieve_candidates.py` 和 `rerank_lib.retrieve_candidates`。
+
+支持三种召回方式：
+
+```text
+lexical
+embedding
+hybrid
+```
+
+Lexical 召回：
+
+- 使用 `TfidfVectorizer`
+- 字符级 n-gram
+- 默认 `ngram_range=(2, 4)`
+- 适合中英文混合、术语匹配和表格编号匹配。
+
+Embedding 召回：
+
+- 使用 `BAAI/bge-m3` 等语义模型。
+- 适合语义相近但字面不完全一致的问题。
+
+Hybrid 召回：
+
+```text
+hybrid_score = alpha * embedding_score + (1 - alpha) * lexical_score
+```
+
+默认 `hybrid_alpha=0.7`。
+
+如果问题指定了 `doc_id`，召回池会优先限制在对应文档内，避免跨文档误召回。
+
+## 证据图设计
+
+证据图构建位于 `scripts/02_build_graph.py`。
+
+节点类型包括：
+
+```text
+page, text, table, figure, caption, equation
+```
+
+边类型包括：
+
+```text
+belongs_to_page
+same_page
+table_caption
+figure_caption
+text_ref_table
+text_ref_figure
+related
+```
+
+边的含义：
+
+- `belongs_to_page`：节点属于某一页。
+- `same_page`：同页内不同证据节点之间的弱连接。
+- `table_caption`：表格与表注之间的强连接。
+- `figure_caption`：图片与图注之间的强连接。
+- `text_ref_table`：正文显式引用某个表格。
+- `text_ref_figure`：正文显式引用某个图片。
+
+证据图使用 `networkx` 存储和计算。它在后续重排序中提供 PPR、Bridge 和邻居补证逻辑。
+
+## 重排序方法 G0-G4
+
+核心逻辑位于 `scripts/rerank_lib.py`。
+
+### G0：原始候选顺序
+
+G0 保留初始召回结果，用作 baseline。
+
+```text
+G0 = candidate retrieval order
+```
+
+### G1：语义相似度重排
+
+G1 只使用查询和节点之间的语义相似度。
+
+```text
+G1 = Sim(q, node)
+```
+
+Sim 可以来自 lexical、embedding 或 hybrid。
+
+### G2：语义相似度 + 查询感知 PPR
+
+G2 引入证据图上的 Personalized PageRank。
+
+```text
+G2 = alpha * Sim + beta * PPR
+```
+
+PPR 的 personalization 由候选节点的相似度分布初始化，因此它是查询感知的图传播，而不是静态 PageRank。
+
+系统会根据问题类型动态调整 PPR 信号权重。例如纯文本事实题会弱化图传播，表格/图像问题会增强结构传播。
+
+### G3：语义 + PPR + Bridge + 引用信号
+
+G3 进一步加入跨模态桥接分数和显式引用分数。
+
+```text
+G3 = λs * Sim + λp * PPR + λb * Bridge + λr * Reference
+```
+
+Bridge 分数衡量一个候选节点是否能连接到问题需要的其他模态。例如：
+
+- 文本节点旁边有相关表格。
+- 图注连接到图片节点。
+- 正文引用了某个 figure/table。
+- 同页存在可补充的视觉证据。
+
+Reference 分数用于处理问题里显式出现的 `Table 1`、`Figure 2`、`图 3` 等引用。
+
+### G4：视觉 Grounding 增强排序
+
+G4 在 G3 基础上加入视觉信号。
+
+```text
+G4 = G3 + visual_weight * visual_score * max(0.05, 1 - G3)
+```
+
+视觉信号来自：
+
+- 节点是否有裁剪图。
+- 节点是否有视觉 caption 或 `qa_evidence`。
+- 节点类型是否匹配问题意图。
+- 视觉描述与问题的 lexical 相似度。
+- 视觉节点是否与主证据存在图关系。
+
+`visual_weight` 会根据问题类型动态变化：
+
+- 文本事实题：较小。
+- 表格/图像题：较大。
+- 跨模态/定位题：中等偏高。
+
+这样可以避免视觉信号过度干扰纯文本问题，同时在多模态问题中突出视觉证据。
+
+## 证据链生成
+
+证据链构建位于 `scripts/09_build_evidence_chains.py`。
+
+系统不是简单展示 Top-K，而是把证据组织成角色链路。
+
+证据角色包括：
+
+```text
+main_evidence
+explicit_reference
+table_or_figure
+caption
+context_text
+graph_neighbor
+visual_companion
+```
+
+构建逻辑：
+
+1. 选取 G4 Top-1 作为主证据。
+2. 如果问题包含图表编号，优先补充显式引用证据。
+3. 如果问题需要视觉信息，优先补充 table/figure/caption 节点。
+4. 沿证据图查找邻居节点，补充上下文或跨模态节点。
+5. 如果视觉问题仍缺少视觉节点，强制寻找同页或图邻居视觉补充节点。
+6. 最多保留若干步，默认 `max_steps=5`。
+
+输出：
+
+```text
+outputs/evidence_chains/chains.jsonl
+outputs/evidence_chains/chain_steps.csv
+outputs/evidence_chains/evidence_chains.md
+```
+
+## 证据卡片生成
+
+证据卡片生成位于 `scripts/11_build_evidence_cards.py`。
+
+当前卡片为横版：
+
+```text
+1920 x 1080
+```
+
+卡片内容包括：
+
+- 问题
+- 答案
+- 来源页
+- 证据链步骤
+- 节点角色
+- 节点页码和类型
+- 局部视觉裁剪图
+- 简短证据摘要
+
+卡片使用 `Pillow` 生成，不依赖外部生图服务。因此它可复现、速度快，也适合本地演示。
+
+质量检查脚本：
+
+```text
+scripts/12_check_evidence_cards.py
+```
+
+检查内容包括：
+
+- 卡片是否存在。
+- 尺寸是否为 1920 x 1080。
+- 是否非空白。
+- 问题和答案是否存在。
+- 证据链步骤是否足够。
+- 是否有可访问的裁剪图。
+- 多模态问题是否包含视觉节点。
+
+## 后端实现简述
+
+后端位于 `backend/app.py`，使用 FastAPI。
+
+主要接口：
 
 ```text
 GET  /api/health
@@ -183,30 +388,98 @@ GET  /api/jobs/{job_id}
 GET  /api/jobs/{job_id}/files/{path}
 ```
 
-上传 PDF 示例：
+上传 PDF 后，后端会创建一个异步 job，结果写入：
 
-```bash
-curl -X POST \
-  -F "pdf=@example.pdf;type=application/pdf" \
-  -F "question=这篇文档的主要结论是什么？" \
-  http://127.0.0.1:8765/api/analyze
+```text
+outputs/upload_jobs/{job_id}/
 ```
 
-返回 `job_id` 后，轮询：
+每个 job 包含：
 
-```bash
-curl http://127.0.0.1:8765/api/jobs/<job_id>
+```text
+pdfs/
+nodes.jsonl
+edges.jsonl
+candidates.csv
+reranked.csv
+chain_steps.csv
+evidence_card.png
+result.json
+status.json
 ```
 
-任务完成后，返回结果中包含：
+前端通过轮询 `GET /api/jobs/{job_id}` 获取进度和最终结果。
 
-- `question`：问题、答案、证据卡片 URL、质量状态。
-- `steps`：证据链步骤。
-- `rankings`：G0-G4 排序结果。
+## 前端实现简述
 
-## 离线实验流水线
+前端位于 `web/`，使用 React + Vite。
 
-将 PDF 放入 `data/pdfs/`，并准备 `data/questions.csv` 后，可以运行完整离线流程：
+页面流程：
+
+1. 选择 PDF：上传本地 PDF 或选择系统 PDF。
+2. 选择问题：上传 PDF 显示自定义问题；系统 PDF 显示预设问题。
+3. 展示证据：上方显示横版证据卡片，下方按相关性展示证据节点。
+
+系统 PDF 的前端数据由脚本导出：
+
+```text
+scripts/13_export_frontend_data.py
+```
+
+导出结果：
+
+```text
+web/public/app-data.json
+web/public/outputs/
+```
+
+上传 PDF 时，前端直接调用 FastAPI 后端。
+
+## 运行方式
+
+安装 Python 依赖：
+
+```bash
+pip install -r requirements.txt
+```
+
+安装前端依赖：
+
+```bash
+cd web
+npm install
+```
+
+启动后端：
+
+```bash
+python -m uvicorn backend.app:app --host 127.0.0.1 --port 8765
+```
+
+导出系统 PDF 的前端数据：
+
+```bash
+python scripts/13_export_frontend_data.py
+```
+
+构建并启动前端：
+
+```bash
+cd web
+npm run build
+cd dist
+python -m http.server 5174 --bind 127.0.0.1
+```
+
+访问：
+
+```text
+http://127.0.0.1:5174/
+```
+
+## 离线实验命令
+
+完整流水线：
 
 ```bash
 python scripts/06_run_pipeline.py \
@@ -216,92 +489,23 @@ python scripts/06_run_pipeline.py \
   --embedding-device auto
 ```
 
-常见输出：
-
-```text
-outputs/parsed/nodes.jsonl
-outputs/parsed/edges.jsonl
-outputs/rankings/candidates.csv
-outputs/rankings/reranked.csv
-outputs/metrics/summary_metrics.csv
-outputs/evidence_chains/chain_steps.csv
-outputs/evidence_cards/*_evidence_card.png
-```
-
-生成或更新离线结果后，重新导出前端数据：
+单步运行：
 
 ```bash
+python scripts/01_parse_pdf.py
+python scripts/10_build_visual_evidence.py
+python scripts/02_build_graph.py
+python scripts/03_retrieve_candidates.py
+python scripts/04_rerank.py
+python scripts/09_build_evidence_chains.py
+python scripts/11_build_evidence_cards.py
+python scripts/12_check_evidence_cards.py
 python scripts/13_export_frontend_data.py
-cd web
-npm run build
 ```
 
-## 数据格式
+## 当前技术边界
 
-`data/questions.csv` 字段：
-
-```text
-question_id,doc_id,question,answer,question_type,gold_node_ids,gold_pages,gold_modalities,evidence_note
-```
-
-`outputs/parsed/nodes.jsonl` 主要字段：
-
-```text
-node_id, doc_id, page, node_type, content, source_ref,
-page_image_path, crop_image_path, bbox, visual_summary, visual_caption
-```
-
-`outputs/evidence_chains/chain_steps.csv` 主要字段：
-
-```text
-question_id, chain_step, role, node_id, node_type, page,
-relation, score, visual_score, crop_image_path, content_preview, reason
-```
-
-## 可选视觉模型接入
-
-`scripts/10_build_visual_evidence.py` 支持本地 caption、Qwen-VL 和豆包 Ark 兼容接口。使用云端视觉模型前需要配置 API key。
-
-Qwen 示例：
-
-```bash
-export DASHSCOPE_API_KEY=your_key
-python scripts/10_build_visual_evidence.py \
-  --caption-provider qwen \
-  --qwen-model qwen-vl-plus \
-  --max-captions 50
-```
-
-豆包 Ark 示例：
-
-```bash
-export ARK_API_KEY=your_key
-export ARK_MODEL=your_model_endpoint
-python scripts/10_build_visual_evidence.py \
-  --caption-provider doubao \
-  --max-captions 50
-```
-
-## GitHub 提交说明
-
-仓库已经包含 `.gitignore`，默认不会提交以下内容：
-
-- PDF 原文：`data/pdfs/*.pdf`
-- 运行结果：`outputs/`
-- 前端构建产物：`web/dist/`
-- 前端静态导出资源：`web/public/outputs/`
-- 前端依赖：`web/node_modules/`
-- API key、`.env`、缓存和日志
-
-如果希望公开演示数据，可以额外准备脱敏的小型 PDF 或示例 JSON，并单独调整 `.gitignore`。
-
-## 当前限制
-
-- 上传 PDF 的在线分析会随 PDF 页数、embedding 模型和设备性能变慢。
-- 默认 PDF 解析主要依赖文本抽取和 PyMuPDF 页面裁剪，复杂表格结构仍可能需要人工补充或更强的文档解析器。
-- 云端视觉 caption 需要自行配置 API key，默认上传流程不会调用外部视觉 API。
-- `outputs/` 和 `data/pdfs/` 默认不进入 GitHub，因此克隆仓库后需要重新准备 PDF 并运行流水线。
-
-## 项目定位
-
-本项目是一个多模态 RAG 证据链展示与评测原型，重点不只是回答问题，而是展示答案背后的证据来源、页面定位、图文关系和排序依据。它适合用于课程设计、开题报告原型、论文实验演示，以及复杂文档问答系统的前期验证。
+- 当前向量索引是本地 `.npz` 缓存和内存矩阵检索，不是独立向量数据库。
+- PDF 表格结构主要依赖文本抽取和规则推断，复杂表格仍可能需要 RAG-Anything/MinerU 或人工补充节点。
+- 默认上传流程不会调用外部 VLM API，因此视觉理解主要体现为裁剪图 grounding 和可选 caption 字段。
+- 大 PDF 首次运行会较慢，主要耗时在页面渲染、embedding 编码和证据卡片生成。
