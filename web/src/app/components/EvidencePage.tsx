@@ -90,6 +90,7 @@ export function EvidencePage({ data, question, request, onBack }: EvidencePagePr
         const formData = new FormData();
         formData.append('pdf', uploadRequest.file);
         formData.append('question', uploadRequest.question);
+        formData.append('chunk_template', uploadRequest.chunk_template);
 
         const response = await fetch(`${API_BASE}/api/analyze`, {
           method: 'POST',

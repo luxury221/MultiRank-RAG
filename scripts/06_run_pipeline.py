@@ -25,6 +25,13 @@ def main() -> None:
     parser.add_argument("--candidate-k", type=int, default=50, help="Candidate pool size before reranking.")
     parser.add_argument("--rerank-k", type=int, default=None, help="Final rows kept per method after reranking.")
     parser.add_argument("--skip-parse", action="store_true")
+    parser.add_argument(
+        "--chunk-template",
+        choices=["auto", "general", "ai", "math", "finance", "medical"],
+        default="auto",
+        help="Paper-aware parser template used by scripts/01_parse_pdf.py.",
+    )
+    parser.add_argument("--chunk-size", type=int, default=900)
     parser.add_argument("--skip-visual", action="store_true")
     parser.add_argument("--visual-dpi", type=int, default=120)
     parser.add_argument("--visual-caption-provider", choices=["local", "qwen"], default="local")
@@ -36,19 +43,19 @@ def main() -> None:
     parser.add_argument("--qwen-api-key-env", default="DASHSCOPE_API_KEY")
     parser.add_argument(
         "--candidate-retriever",
-        choices=["hybrid", "embedding", "lexical"],
-        default="lexical",
+        choices=["fusion", "hybrid", "embedding", "lexical"],
+        default="fusion",
         help="Retriever used for G0 candidate generation.",
     )
     parser.add_argument(
         "--rerank-retriever",
-        choices=["hybrid", "embedding", "lexical"],
-        default="hybrid",
+        choices=["fusion", "hybrid", "embedding", "lexical"],
+        default="fusion",
         help="Retriever used for G1-G4 similarity scores.",
     )
     parser.add_argument(
         "--retriever",
-        choices=["hybrid", "embedding", "lexical"],
+        choices=["fusion", "hybrid", "embedding", "lexical"],
         default="",
         help="Backward-compatible shortcut that sets both candidate and rerank retrievers.",
     )
@@ -75,7 +82,17 @@ def main() -> None:
         questions = args.questions
         edges = "outputs/parsed/edges.jsonl"
         if not args.skip_parse:
-            run_step([py, "scripts/01_parse_pdf.py"])
+            run_step(
+                [
+                    py,
+                    "scripts/01_parse_pdf.py",
+                    "--chunk-template",
+                    args.chunk_template,
+                    "--chunk-size",
+                    str(args.chunk_size),
+                ]
+            )
+            run_step([py, "scripts/14_chunk_quality_report.py", "--nodes", nodes])
         if not args.skip_visual:
             visual_step = [
                 py,

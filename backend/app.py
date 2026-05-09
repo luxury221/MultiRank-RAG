@@ -56,6 +56,7 @@ def load_script_module(name: str, path: Path):
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Cannot load script module: {path}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -65,6 +66,7 @@ build_graph_edges = load_script_module("build_graph_script", SCRIPTS_DIR / "02_b
 visual_evidence = load_script_module("visual_evidence_script", SCRIPTS_DIR / "10_build_visual_evidence.py")
 chain_builder = load_script_module("chain_builder_script", SCRIPTS_DIR / "09_build_evidence_chains.py")
 card_builder = load_script_module("card_builder_script", SCRIPTS_DIR / "11_build_evidence_cards.py")
+chunk_reporter = load_script_module("chunk_reporter_script", SCRIPTS_DIR / "14_chunk_quality_report.py")
 
 
 def safe_filename(filename: str) -> str:
@@ -134,10 +136,26 @@ def write_single_question(job: Path, question: dict[str, str]) -> Path:
     return path
 
 
-def candidate_rows_for_question(question: dict[str, str], nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def candidate_rows_for_question(
+    question: dict[str, str],
+    nodes: list[dict[str, Any]],
+    job: Path | None = None,
+    embedding_index: EmbeddingIndex | None = None,
+) -> list[dict[str, Any]]:
     candidate_k = int(os.getenv("RAG_BACKEND_CANDIDATE_K", "50"))
-    retriever = os.getenv("RAG_BACKEND_CANDIDATE_RETRIEVER", "lexical")
-    candidates, scores = retrieve_candidates(question, nodes, top_k=candidate_k, retriever=retriever)
+    retriever = os.getenv("RAG_BACKEND_CANDIDATE_RETRIEVER", "fusion")
+    candidates, scores = retrieve_candidates(
+        question,
+        nodes,
+        top_k=candidate_k,
+        retriever=retriever,
+        embedding_index=embedding_index,
+        embedding_model=os.getenv("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
+        embedding_cache=os.getenv("RAG_BACKEND_EMBEDDING_CACHE", str((job or JOB_ROOT) / "embeddings")),
+        embedding_device=os.getenv("RAG_EMBEDDING_DEVICE", DEFAULT_EMBEDDING_DEVICE),
+        embedding_batch_size=int(os.getenv("RAG_EMBEDDING_BATCH_SIZE", str(DEFAULT_EMBEDDING_BATCH_SIZE))),
+        hybrid_alpha=float(os.getenv("RAG_BACKEND_HYBRID_ALPHA", "0.7")),
+    )
     rows: list[dict[str, Any]] = []
     for rank, node in enumerate(candidates, start=1):
         node_id = clean_text(node.get("node_id"))
@@ -152,7 +170,9 @@ def candidate_rows_for_question(question: dict[str, str], nodes: list[dict[str, 
                 "page": node.get("page", ""),
                 "score": round(scores.get(node_id, 0.0), 6),
                 "retriever": retriever,
-                "embedding_model": "",
+                "embedding_model": os.getenv("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+                if retriever in {"embedding", "hybrid", "fusion"}
+                else "",
                 "source_ref": node.get("source_ref", ""),
                 "content_preview": preview(node.get("content", "")),
             }
@@ -161,8 +181,9 @@ def candidate_rows_for_question(question: dict[str, str], nodes: list[dict[str, 
 
 
 def build_embedding_index_for_backend(nodes: list[dict[str, Any]], job: Path) -> EmbeddingIndex | None:
-    retriever = os.getenv("RAG_BACKEND_RERANK_RETRIEVER", "hybrid")
-    if retriever not in {"embedding", "hybrid"}:
+    retriever = os.getenv("RAG_BACKEND_RERANK_RETRIEVER", "fusion")
+    candidate_retriever = os.getenv("RAG_BACKEND_CANDIDATE_RETRIEVER", "fusion")
+    if retriever not in {"embedding", "hybrid", "fusion"} and candidate_retriever not in {"embedding", "hybrid", "fusion"}:
         return None
     model = os.getenv("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
     device = os.getenv("RAG_EMBEDDING_DEVICE", DEFAULT_EMBEDDING_DEVICE)
@@ -250,11 +271,16 @@ def write_csv_dicts(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
-def run_upload_job(job_id: str, question_text: str, pdf_path: Path) -> None:
+def normalize_chunk_template(value: str) -> str:
+    value = clean_text(value).lower() or "auto"
+    return value if value in {"auto", "general", "ai", "math", "finance", "medical"} else "auto"
+
+
+def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_template: str = "auto") -> None:
     job = job_dir(job_id)
     try:
         write_status(job_id, status="running", stage="parse", progress=8)
-        append_log(job_id, "正在解析 PDF 并生成文本、表格、图注节点")
+        append_log(job_id, f"正在解析 PDF 并生成模板化 chunk，模板：{chunk_template}")
 
         doc_id = normalize_doc_id(pdf_path.name)
         question = {
@@ -270,8 +296,16 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path) -> None:
         }
         write_single_question(job, question)
 
-        nodes = parse_pdf.pdf_to_nodes(pdf_path, chunk_size=int(os.getenv("RAG_BACKEND_CHUNK_SIZE", "900")))
+        nodes = parse_pdf.pdf_to_nodes(
+            pdf_path,
+            chunk_size=int(os.getenv("RAG_BACKEND_CHUNK_SIZE", "900")),
+            chunk_template=chunk_template or os.getenv("RAG_BACKEND_CHUNK_TEMPLATE", "auto"),
+        )
         write_jsonl(job / "nodes.raw.jsonl", nodes)
+        chunk_report_rows = chunk_reporter.build_report(nodes)
+        write_csv_dicts(job / "chunk_quality.csv", chunk_report_rows)
+        chunk_report = chunk_report_rows[0] if chunk_report_rows else {}
+        write_status(job_id, chunk_template=chunk_template, chunk_report=chunk_report)
 
         write_status(job_id, stage="visual", progress=24)
         append_log(job_id, "正在为页面和证据节点生成视觉裁剪图")
@@ -297,13 +331,13 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path) -> None:
 
         write_status(job_id, stage="retrieve", progress=52)
         append_log(job_id, "正在召回候选证据")
-        candidate_rows = candidate_rows_for_question(question, nodes)
+        embedding_index = build_embedding_index_for_backend(nodes, job)
+        candidate_rows = candidate_rows_for_question(question, nodes, job, embedding_index)
         write_csv_dicts(job / "candidates.csv", candidate_rows)
 
         write_status(job_id, stage="rerank", progress=68)
         append_log(job_id, "正在进行 G4 证据重排序")
-        rerank_retriever = os.getenv("RAG_BACKEND_RERANK_RETRIEVER", "hybrid")
-        embedding_index = build_embedding_index_for_backend(nodes, job)
+        rerank_retriever = os.getenv("RAG_BACKEND_RERANK_RETRIEVER", "fusion")
         ranking_rows = rank_question(
             question,
             nodes,
@@ -367,6 +401,7 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path) -> None:
             },
             "steps": normalized_steps,
             "rankings": normalize_ranking_for_frontend(job_id, ranking_rows),
+            "chunk_report": chunk_report,
         }
         (job / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         write_status(job_id, status="succeeded", stage="done", progress=100, result=result)
@@ -385,8 +420,10 @@ async def analyze_pdf(
     background_tasks: BackgroundTasks,
     pdf: UploadFile = File(...),
     question: str = Form(...),
+    chunk_template: str = Form("auto"),
 ) -> dict[str, Any]:
     question = clean_text(question)
+    chunk_template = normalize_chunk_template(chunk_template)
     if not question:
         raise HTTPException(status_code=400, detail="Question is required")
     if not pdf.filename or not pdf.filename.lower().endswith(".pdf"):
@@ -408,9 +445,10 @@ async def analyze_pdf(
         progress=0,
         pdf_name=pdf_path.name,
         question=question,
+        chunk_template=chunk_template,
         logs=["任务已创建"],
     )
-    background_tasks.add_task(run_upload_job, job_id, question, pdf_path)
+    background_tasks.add_task(run_upload_job, job_id, question, pdf_path, chunk_template)
     return {"job_id": job_id, "status": "queued"}
 
 

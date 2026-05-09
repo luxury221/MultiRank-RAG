@@ -88,6 +88,22 @@ def union_bbox(items: list[list[float]]) -> list[float]:
     ]
 
 
+def parse_bbox(value: Any) -> list[float]:
+    if not value:
+        return []
+    try:
+        if isinstance(value, str):
+            payload = json.loads(value)
+        else:
+            payload = value
+        bbox = [float(item) for item in payload]
+    except Exception:
+        return []
+    if len(bbox) != 4 or rect_area(bbox) <= 0:
+        return []
+    return bbox
+
+
 def horizontal_overlap(a: list[float], b: list[float]) -> float:
     left = max(a[0], b[0])
     right = min(a[2], b[2])
@@ -540,8 +556,15 @@ def process_document(
 
             bbox: list[float] = []
             bbox_source = ""
+            layout_bbox = parse_bbox(node.get("bbox"))
+            if layout_bbox:
+                bbox = expand_bbox(layout_bbox, page.rect, 6)
+                bbox_source = clean_text(node.get("bbox_source")) or "layout_bbox"
+
             matched_block = find_best_text_block(node, text_blocks)
-            if node_type == "figure":
+            if bbox:
+                pass
+            elif node_type == "figure":
                 bbox, bbox_source = choose_figure_region(matched_block, image_blocks, page.rect)
             elif node_type == "table" and str(node.get("content", "")).startswith("Table node inferred"):
                 bbox, bbox_source = choose_table_region(matched_block, text_blocks, page.rect)

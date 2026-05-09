@@ -45,7 +45,7 @@ def main() -> None:
     parser.add_argument("--nodes", default=str(DEFAULT_NODES.relative_to(DEFAULT_NODES.parents[2])))
     parser.add_argument("--output", default=str(DEFAULT_CANDIDATES.relative_to(DEFAULT_CANDIDATES.parents[2])))
     parser.add_argument("--top-k", type=int, default=50, help="Candidate pool size before reranking.")
-    parser.add_argument("--retriever", choices=["hybrid", "embedding", "lexical"], default="lexical")
+    parser.add_argument("--retriever", choices=["fusion", "hybrid", "embedding", "lexical"], default="fusion")
     parser.add_argument("--embedding-model", default=DEFAULT_EMBEDDING_MODEL)
     parser.add_argument("--embedding-cache", default="outputs/embeddings")
     parser.add_argument("--embedding-device", default=DEFAULT_EMBEDDING_DEVICE)
@@ -57,7 +57,7 @@ def main() -> None:
     questions = [row for row in read_csv(args.questions) if clean_text(row.get("question"))]
     nodes = read_jsonl(args.nodes)
     embedding_index = None
-    if args.retriever in {"embedding", "hybrid"} and nodes:
+    if args.retriever in {"embedding", "hybrid", "fusion"} and nodes:
         embedding_index = EmbeddingIndex.from_nodes(
             nodes,
             model_name=args.embedding_model,
@@ -92,7 +92,7 @@ def main() -> None:
                     "page": node.get("page", ""),
                     "score": round(scores.get(node.get("node_id", ""), 0.0), 6),
                     "retriever": args.retriever,
-                    "embedding_model": args.embedding_model if args.retriever in {"embedding", "hybrid"} else "",
+                    "embedding_model": args.embedding_model if args.retriever in {"embedding", "hybrid", "fusion"} else "",
                     "source_ref": node.get("source_ref", ""),
                     "content_preview": preview(node.get("content", "")),
                 }

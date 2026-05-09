@@ -29,7 +29,7 @@ TYPE_WEIGHTS = {
 }
 
 DEFAULT_MODALITIES = ["text", "table", "figure", "page", "caption"]
-RETRIEVER_CHOICES = ["hybrid", "embedding", "lexical"]
+RETRIEVER_CHOICES = ["fusion", "hybrid", "embedding", "lexical"]
 
 BASE_EDGE_TYPE_WEIGHTS = {
     "same_page": 0.05,
@@ -38,6 +38,10 @@ BASE_EDGE_TYPE_WEIGHTS = {
     "text_ref_figure": 1.0,
     "table_caption": 1.2,
     "figure_caption": 1.2,
+    "section_title": 0.35,
+    "same_section": 0.12,
+    "parent_section": 0.45,
+    "chunk_sequence": 0.08,
     "related": 0.2,
 }
 
@@ -87,6 +91,16 @@ VISUAL_QUESTION_TYPE_TERMS = (
     "\u8de8\u6a21\u6001\u7efc\u5408",
 )
 
+SECTION_QUERY_HINTS = {
+    "method": ("method", "methods", "methodology", "approach", "\u65b9\u6cd5"),
+    "experiment": ("experiment", "experiments", "evaluation", "results", "\u5b9e\u9a8c", "\u7ed3\u679c", "\u8bc4\u4f30"),
+    "dataset": ("dataset", "benchmark", "data", "\u6570\u636e\u96c6", "\u6570\u636e"),
+    "conclusion": ("conclusion", "discussion", "limitations", "\u7ed3\u8bba", "\u8ba8\u8bba", "\u5c40\u9650"),
+    "theory": ("theorem", "lemma", "proof", "definition", "\u5b9a\u7406", "\u5f15\u7406", "\u8bc1\u660e", "\u5b9a\u4e49"),
+    "finance": ("regression", "variables", "risk", "robustness", "\u56de\u5f52", "\u53d8\u91cf", "\u98ce\u9669", "\u7a33\u5065"),
+    "medical": ("patient", "trial", "outcome", "adverse", "\u60a3\u8005", "\u8bd5\u9a8c", "\u7ed3\u5c40", "\u4e0d\u826f\u4e8b\u4ef6"),
+}
+
 
 def lexical_similarity(query: str, texts: list[str]) -> list[float]:
     query = clean_text(query)
@@ -108,6 +122,246 @@ def lexical_similarity(query: str, texts: list[str]) -> list[float]:
         return [_char_jaccard(query, text) for text in texts]
 
 
+def _scores_from_texts(query: str, nodes: list[dict[str, Any]], texts: list[str]) -> dict[str, float]:
+    values = lexical_similarity(query, texts)
+    return {
+        clean_text(node.get("node_id")): score
+        for node, score in zip(nodes, values)
+        if clean_text(node.get("node_id"))
+    }
+
+
+def _embedding_scores_safe(
+    question: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    embedding_index: EmbeddingIndex | None,
+    embedding_model: str,
+    embedding_cache: str,
+    embedding_device: str,
+    embedding_batch_size: int,
+) -> dict[str, float]:
+    if embedding_index is None:
+        return {}
+    try:
+        return embedding_index.score(question.get("question", ""), nodes)
+    except Exception:
+        return {}
+
+
+def section_route_text(node: dict[str, Any]) -> str:
+    return clean_text(
+        " ".join(
+            [
+                f"paper_domain:{node.get('paper_domain', '')}",
+                f"section:{node.get('section', '')}",
+                f"node_type:{node.get('node_type', '')}",
+                f"structure_type:{node.get('structure_type', '')}",
+                f"chunk_strategy:{node.get('chunk_strategy', '')}",
+                f"layout_role:{node.get('layout_role', '')}",
+                f"explicit_refs:{node.get('explicit_refs', '')}",
+                preview(node.get("content", ""), 240),
+            ]
+        )
+    )
+
+
+def section_structure_scores(question: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[str, float]:
+    query = clean_text(question.get("question", ""))
+    blob = _question_blob(question)
+    expanded_terms: list[str] = [query]
+    for terms in SECTION_QUERY_HINTS.values():
+        if any(term.casefold() in blob for term in terms):
+            expanded_terms.extend(terms)
+    expanded_query = " ".join(dict.fromkeys(term for term in expanded_terms if term))
+    raw_scores = _scores_from_texts(expanded_query, nodes, [section_route_text(node) for node in nodes])
+    scores: dict[str, float] = {}
+    for node in nodes:
+        node_id = clean_text(node.get("node_id"))
+        if not node_id:
+            continue
+        bonus = 0.0
+        node_type = clean_text(node.get("node_type"))
+        structure_type = clean_text(node.get("structure_type"))
+        if node_type == "title":
+            bonus += 0.08
+        if structure_type and structure_type != "section_title":
+            bonus += 0.08
+        if clean_text(node.get("section")) and any(
+            term.casefold() in blob for term in [clean_text(node.get("section")).casefold()]
+        ):
+            bonus += 0.12
+        scores[node_id] = raw_scores.get(node_id, 0.0) + bonus
+    return scores
+
+
+def reference_route_scores(question: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[str, float]:
+    question_refs = extract_document_refs(question.get("question", ""))
+    scores: dict[str, float] = {}
+    for node in nodes:
+        node_id = clean_text(node.get("node_id"))
+        if not node_id:
+            continue
+        content = f"{node.get('content', '')} {node.get('source_ref', '')} {node.get('explicit_refs', '')}"
+        node_refs = extract_document_refs(content)
+        hits = node_refs & question_refs if question_refs else set()
+        node_type = clean_text(node.get("node_type")) or "text"
+        score = 0.0
+        if hits:
+            score = _reference_weight(node_type, hits)
+        elif question_refs and clean_text(node.get("explicit_refs")):
+            score = 0.2
+        scores[node_id] = score
+    return scores
+
+
+def visual_route_scores(question: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[str, float]:
+    intent = question_intent(question)
+    if not intent["visual"]:
+        return {clean_text(node.get("node_id")): 0.0 for node in nodes if clean_text(node.get("node_id"))}
+    visual_texts = [
+        clean_text(
+            " ".join(
+                [
+                    node.get("node_type", ""),
+                    node.get("layout_role", ""),
+                    node.get("bbox_source", ""),
+                    visual_text_for_node(node),
+                    preview(node.get("content", ""), 220),
+                ]
+            )
+        )
+        for node in nodes
+    ]
+    raw_scores = _scores_from_texts(question.get("question", ""), nodes, visual_texts)
+    scores: dict[str, float] = {}
+    for node in nodes:
+        node_id = clean_text(node.get("node_id"))
+        if not node_id:
+            continue
+        node_type = clean_text(node.get("node_type"))
+        bonus = 0.0
+        if intent["table"] and node_type == "table":
+            bonus += 0.35
+        if intent["figure"] and node_type in {"figure", "caption"}:
+            bonus += 0.35
+        if intent["visual"] and node_type in VISUAL_NODE_TYPES:
+            bonus += 0.15
+        if clean_text(node.get("bbox")):
+            bonus += 0.05
+        if node_has_visual_caption(node):
+            bonus += 0.08
+        scores[node_id] = raw_scores.get(node_id, 0.0) + bonus
+    return scores
+
+
+def layout_route_scores(question: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[str, float]:
+    intent = question_intent(question)
+    if not intent["location"]:
+        return {clean_text(node.get("node_id")): 0.0 for node in nodes if clean_text(node.get("node_id"))}
+    scores: dict[str, float] = {}
+    for node in nodes:
+        node_id = clean_text(node.get("node_id"))
+        if not node_id:
+            continue
+        score = 0.0
+        if clean_text(node.get("bbox")):
+            score += 0.35
+        if clean_text(node.get("page_image_path")):
+            score += 0.15
+        if clean_text(node.get("crop_image_path")):
+            score += 0.2
+        if clean_text(node.get("layout_parser")):
+            score += 0.1
+        scores[node_id] = score
+    return scores
+
+
+def route_weights_for_question(question: dict[str, Any], available_routes: dict[str, dict[str, float]]) -> dict[str, float]:
+    intent = question_intent(question)
+    weights = {
+        "lexical": 1.0,
+        "embedding": 1.15,
+        "section": 0.75,
+        "reference": 0.95 if extract_document_refs(question.get("question", "")) else 0.35,
+        "visual": 0.35,
+        "layout": 0.2,
+    }
+    if intent["table"] or intent["figure"]:
+        weights["visual"] = 1.0
+        weights["reference"] = max(weights["reference"], 0.8)
+    if intent["cross"]:
+        weights["visual"] = max(weights["visual"], 0.85)
+        weights["section"] = max(weights["section"], 0.85)
+    if intent["location"]:
+        weights["layout"] = 0.9
+    if intent["text_fact"]:
+        weights["visual"] *= 0.35
+        weights["layout"] *= 0.4
+    return {route: weights.get(route, 0.5) for route in available_routes}
+
+
+def rrf_fuse_scores(
+    route_scores: dict[str, dict[str, float]],
+    node_ids: list[str],
+    route_weights: dict[str, float],
+    rrf_k: int = 60,
+) -> dict[str, float]:
+    fused = {node_id: 0.0 for node_id in node_ids}
+    for route, scores in route_scores.items():
+        normalized = normalize_scores(scores, node_ids)
+        ranking = [
+            (node_id, normalized.get(node_id, 0.0))
+            for node_id in node_ids
+            if normalized.get(node_id, 0.0) > 0.0
+        ]
+        ranking.sort(key=lambda item: item[1], reverse=True)
+        weight = route_weights.get(route, 0.5)
+        for rank, (node_id, score) in enumerate(ranking, start=1):
+            fused[node_id] += weight * (1.0 / (rrf_k + rank)) * (0.5 + 0.5 * score)
+    return normalize_scores(fused, node_ids)
+
+
+def fusion_scores(
+    question: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    embedding_index: EmbeddingIndex | None = None,
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+    embedding_cache: str = str(DEFAULT_EMBEDDING_CACHE_DIR),
+    embedding_device: str = DEFAULT_EMBEDDING_DEVICE,
+    embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
+) -> dict[str, float]:
+    nodes = [node for node in nodes if clean_text(node.get("node_id")) and clean_text(node.get("content"))]
+    node_ids = [clean_text(node.get("node_id")) for node in nodes]
+    if not nodes:
+        return {}
+    route_scores: dict[str, dict[str, float]] = {
+        "lexical": _scores_from_texts(question.get("question", ""), nodes, [node.get("content", "") for node in nodes]),
+        "section": section_structure_scores(question, nodes),
+        "reference": reference_route_scores(question, nodes),
+        "visual": visual_route_scores(question, nodes),
+        "layout": layout_route_scores(question, nodes),
+    }
+    embedding_scores = _embedding_scores_safe(
+        question,
+        nodes,
+        embedding_index,
+        embedding_model,
+        embedding_cache,
+        embedding_device,
+        embedding_batch_size,
+    )
+    if embedding_scores:
+        route_scores["embedding"] = embedding_scores
+    route_scores = {
+        route: scores
+        for route, scores in route_scores.items()
+        if any(score > 0 for score in scores.values())
+    }
+    if not route_scores:
+        return {node_id: 0.0 for node_id in node_ids}
+    return rrf_fuse_scores(route_scores, node_ids, route_weights_for_question(question, route_scores))
+
+
 def similarity_scores(
     question: dict[str, Any],
     nodes: list[dict[str, Any]],
@@ -124,6 +378,16 @@ def similarity_scores(
         return {}
 
     retriever = (retriever or "lexical").lower()
+    if retriever == "fusion":
+        return fusion_scores(
+            question,
+            nodes,
+            embedding_index=embedding_index,
+            embedding_model=embedding_model,
+            embedding_cache=embedding_cache,
+            embedding_device=embedding_device,
+            embedding_batch_size=embedding_batch_size,
+        )
     if retriever in {"embedding", "hybrid"}:
         index = embedding_index or EmbeddingIndex.from_nodes(
             nodes,

@@ -21,8 +21,33 @@ DEFAULT_EMBEDDING_CACHE_DIR = OUTPUT_DIR / "embeddings"
 
 def node_embedding_text(node: dict[str, Any]) -> str:
     node_type = clean_text(node.get("node_type")) or "text"
+    paper_domain = clean_text(node.get("paper_domain"))
+    section = clean_text(node.get("section"))
+    structure_type = clean_text(node.get("structure_type"))
+    chunk_strategy = clean_text(node.get("chunk_strategy"))
+    previous_preview = clean_text(node.get("previous_chunk_preview"))
+    next_preview = clean_text(node.get("next_chunk_preview"))
+    explicit_refs = clean_text(node.get("explicit_refs"))
     content = clean_text(node.get("content"))
-    return f"{node_type}\n{content}" if content else ""
+    if not content:
+        return ""
+    parts = [f"type: {node_type}"]
+    if paper_domain:
+        parts.append(f"paper_domain: {paper_domain}")
+    if section:
+        parts.append(f"section: {section}")
+    if structure_type:
+        parts.append(f"structure_type: {structure_type}")
+    if chunk_strategy:
+        parts.append(f"chunk_strategy: {chunk_strategy}")
+    if explicit_refs:
+        parts.append(f"explicit_refs: {explicit_refs}")
+    if previous_preview:
+        parts.append(f"previous_context: {previous_preview}")
+    if next_preview:
+        parts.append(f"next_context: {next_preview}")
+    parts.append(content)
+    return "\n".join(parts)
 
 
 def _safe_model_name(model_name: str) -> str:

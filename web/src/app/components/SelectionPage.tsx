@@ -1,6 +1,19 @@
 import { useMemo, useState, type ChangeEvent } from 'react';
-import { ArrowLeft, ChevronRight, FileText, Search, Upload } from 'lucide-react';
-import type { AnalysisRequest, AppData, PdfItem, QuestionItem } from '../types';
+import {
+  ArrowLeft,
+  BrainCircuit,
+  Calculator,
+  ChevronRight,
+  FileText,
+  HeartPulse,
+  Landmark,
+  Layers3,
+  Search,
+  Sparkles,
+  Upload,
+  type LucideIcon,
+} from 'lucide-react';
+import type { AnalysisRequest, AppData, ChunkTemplate, PdfItem, QuestionItem } from '../types';
 
 interface SelectionPageProps {
   data: AppData;
@@ -9,6 +22,15 @@ interface SelectionPageProps {
 
 type Step = 'document' | 'question';
 type SourceMode = 'system' | 'upload';
+
+const CHUNK_TEMPLATE_OPTIONS: { value: ChunkTemplate; label: string; icon: LucideIcon }[] = [
+  { value: 'auto', label: 'Auto', icon: Sparkles },
+  { value: 'general', label: '通用', icon: Layers3 },
+  { value: 'ai', label: 'AI', icon: BrainCircuit },
+  { value: 'math', label: '数学', icon: Calculator },
+  { value: 'finance', label: '金融', icon: Landmark },
+  { value: 'medical', label: '医学', icon: HeartPulse },
+];
 
 function questionTypeClass(type: string) {
   if (type.includes('表格')) {
@@ -27,6 +49,7 @@ export function SelectionPage({ data, onStartAnalysis }: SelectionPageProps) {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [selectedQuestionId, setSelectedQuestionId] = useState('');
   const [customQuestion, setCustomQuestion] = useState('');
+  const [selectedChunkTemplate, setSelectedChunkTemplate] = useState<ChunkTemplate>('auto');
   const [query, setQuery] = useState('');
 
   const selectedPdf = data.pdfs.find((pdf) => pdf.doc_id === selectedDocId) ?? data.pdfs[0] ?? null;
@@ -95,6 +118,7 @@ export function SelectionPage({ data, onStartAnalysis }: SelectionPageProps) {
         pdf_name: selectedPdfName,
         question: customQuestion.trim(),
         file: uploadedFile,
+        chunk_template: selectedChunkTemplate,
       });
       return;
     }
@@ -123,6 +147,8 @@ export function SelectionPage({ data, onStartAnalysis }: SelectionPageProps) {
 
         {step === 'document' ? (
           <section className="rounded-xl border border-white/70 bg-white/85 p-5 shadow-sm backdrop-blur sm:p-7">
+            <ChunkTemplatePicker value={selectedChunkTemplate} onChange={setSelectedChunkTemplate} />
+
             <label className="block">
               <input className="hidden" type="file" accept="application/pdf,.pdf" onChange={handleUpload} />
               <div
@@ -185,6 +211,11 @@ export function SelectionPage({ data, onStartAnalysis }: SelectionPageProps) {
             <div className="mb-5 rounded-lg border border-slate-200 bg-slate-50 p-4">
               <p className="text-sm text-slate-500">当前文档</p>
               <p className="mt-1 font-semibold text-slate-950">{selectedPdfName}</p>
+              {sourceMode === 'upload' && (
+                <p className="mt-2 text-sm text-cyan-700">
+                  论文领域：{CHUNK_TEMPLATE_OPTIONS.find((option) => option.value === selectedChunkTemplate)?.label}
+                </p>
+              )}
             </div>
 
             {sourceMode === 'upload' ? (
@@ -209,6 +240,41 @@ export function SelectionPage({ data, onStartAnalysis }: SelectionPageProps) {
         )}
       </div>
     </main>
+  );
+}
+
+function ChunkTemplatePicker({
+  value,
+  onChange,
+}: {
+  value: ChunkTemplate;
+  onChange: (value: ChunkTemplate) => void;
+}) {
+  return (
+    <div className="mb-5">
+      <div className="mb-2 text-sm font-medium text-slate-700">论文领域</div>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+        {CHUNK_TEMPLATE_OPTIONS.map((option) => {
+          const Icon = option.icon;
+          const selected = value === option.value;
+          return (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => onChange(option.value)}
+              className={`inline-flex h-11 items-center justify-center gap-2 rounded-lg border px-3 text-sm transition ${
+                selected
+                  ? 'border-cyan-400 bg-cyan-50 text-cyan-800 shadow-sm'
+                  : 'border-slate-200 bg-white text-slate-600 hover:border-cyan-200 hover:text-cyan-700'
+              }`}
+            >
+              <Icon size={16} />
+              {option.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

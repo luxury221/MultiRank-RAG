@@ -1,0 +1,134 @@
+{
+  "templates": {
+    "general": {
+      "label": "通用论文",
+      "chunk_size": 900,
+      "extra_section_aliases": [
+        "materials",
+        "analysis",
+        "case study",
+        "材料",
+        "分析",
+        "案例研究"
+      ],
+      "extra_protected_terms": [
+        "case study",
+        "analysis"
+      ]
+    },
+    "ai": {
+      "label": "AI/计算机论文",
+      "chunk_size": 820,
+      "extra_keywords": [
+        "encoder",
+        "decoder",
+        "attention",
+        "prompt",
+        "fine-tuning",
+        "retriever",
+        "reranker",
+        "嵌入",
+        "检索器",
+        "重排序"
+      ],
+      "extra_section_aliases": [
+        "pretraining",
+        "fine-tuning",
+        "retrieval",
+        "error analysis",
+        "预训练",
+        "微调",
+        "错误分析"
+      ],
+      "extra_protected_terms": [
+        "prompt",
+        "retriever",
+        "reranker"
+      ]
+    },
+    "math": {
+      "label": "数学/理论论文",
+      "chunk_size": 720,
+      "extra_keywords": [
+        "gradient",
+        "convex",
+        "nonconvex",
+        "regularization",
+        "eigenvalue",
+        "证明完毕",
+        "凸",
+        "非凸",
+        "正则化",
+        "特征值"
+      ],
+      "extra_section_aliases": [
+        "main results",
+        "convergence analysis",
+        "appendix proofs",
+        "主要结果",
+        "收敛性分析"
+      ],
+      "extra_protected_terms": [
+        "main result",
+        "convergence"
+      ]
+    },
+    "finance": {
+      "label": "金融/经济论文",
+      "chunk_size": 880,
+      "extra_keywords": [
+        "difference-in-differences",
+        "panel data",
+        "liquidity",
+        "leverage",
+        "insurance claim",
+        "双重差分",
+        "面板数据",
+        "流动性",
+        "杠杆率"
+      ],
+      "extra_section_aliases": [
+        "identification strategy",
+        "summary statistics",
+        "heterogeneity",
+        "机制分析",
+        "异质性分析",
+        "描述性统计"
+      ],
+      "extra_protected_terms": [
+        "summary statistics",
+        "heterogeneity",
+        "identification"
+      ]
+    },
+    "medical": {
+      "label": "医学/生命科学论文",
+      "chunk_size": 780,
+      "extra_keywords": [
+        "placebo",
+        "primary endpoint",
+        "secondary endpoint",
+        "confidence interval",
+        "incidence",
+        "安慰剂",
+        "主要终点",
+        "次要终点",
+        "发生率"
+      ],
+      "extra_section_aliases": [
+        "eligibility criteria",
+        "primary endpoint",
+        "secondary endpoint",
+        "safety analysis",
+        "纳入标准",
+        "排除标准",
+        "安全性分析"
+      ],
+      "extra_protected_terms": [
+        "primary endpoint",
+        "secondary endpoint",
+        "eligibility"
+      ]
+    }
+  }
+}

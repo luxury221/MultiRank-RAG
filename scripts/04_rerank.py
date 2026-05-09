@@ -76,7 +76,7 @@ def main() -> None:
     parser.add_argument("--lambda-b", type=float, default=0.15)
     parser.add_argument("--lambda-r", type=float, default=0.1)
     parser.add_argument("--tau", type=float, default=0.2)
-    parser.add_argument("--retriever", choices=["hybrid", "embedding", "lexical"], default="hybrid")
+    parser.add_argument("--retriever", choices=["fusion", "hybrid", "embedding", "lexical"], default="fusion")
     parser.add_argument("--embedding-model", default=DEFAULT_EMBEDDING_MODEL)
     parser.add_argument("--embedding-cache", default="outputs/embeddings")
     parser.add_argument("--embedding-device", default=DEFAULT_EMBEDDING_DEVICE)
@@ -90,7 +90,7 @@ def main() -> None:
     edges = read_jsonl(args.edges)
     candidates_by_qid = group_candidates(read_csv(args.candidates))
     embedding_index = None
-    if args.retriever in {"embedding", "hybrid"} and nodes:
+    if args.retriever in {"embedding", "hybrid", "fusion"} and nodes:
         embedding_index = EmbeddingIndex.from_nodes(
             nodes,
             model_name=args.embedding_model,

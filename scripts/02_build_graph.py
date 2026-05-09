@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import json
 import re
 from collections import defaultdict
 from typing import Any
@@ -45,8 +46,55 @@ def extract_refs(text: str) -> set[tuple[str, str]]:
     return refs
 
 
+def parse_bbox(value: Any) -> list[float]:
+    if not value:
+        return []
+    try:
+        payload = json.loads(value) if isinstance(value, str) else value
+        bbox = [float(item) for item in payload]
+    except Exception:
+        return []
+    if len(bbox) != 4:
+        return []
+    if max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1]) <= 0:
+        return []
+    return bbox
+
+
+def horizontal_overlap(a: list[float], b: list[float]) -> float:
+    if len(a) != 4 or len(b) != 4:
+        return 0.0
+    left = max(a[0], b[0])
+    right = min(a[2], b[2])
+    overlap = max(0.0, right - left)
+    return overlap / max(1.0, min(a[2] - a[0], b[2] - b[0]))
+
+
+def vertical_gap(a: list[float], b: list[float]) -> float:
+    if len(a) != 4 or len(b) != 4:
+        return 0.0
+    if a[3] < b[1]:
+        return b[1] - a[3]
+    if b[3] < a[1]:
+        return a[1] - b[3]
+    return 0.0
+
+
+def layout_related(caption: dict[str, Any], target: dict[str, Any]) -> bool:
+    caption_bbox = parse_bbox(caption.get("bbox"))
+    target_bbox = parse_bbox(target.get("bbox"))
+    if not caption_bbox or not target_bbox:
+        return True
+    try:
+        page_height = float(caption.get("page_height") or target.get("page_height") or 800.0)
+    except (TypeError, ValueError):
+        page_height = 800.0
+    return horizontal_overlap(caption_bbox, target_bbox) >= 0.03 and vertical_gap(caption_bbox, target_bbox) <= page_height * 0.45
+
+
 def build_edges(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_doc_page: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    by_doc_section: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     by_doc_kind_ref: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     page_nodes: dict[tuple[str, str], str] = {}
 
@@ -54,7 +102,10 @@ def build_edges(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         doc_id = clean_text(node.get("doc_id"))
         page = str(node.get("page", ""))
         node_type = clean_text(node.get("node_type"))
+        section = clean_text(node.get("section"))
         by_doc_page[(doc_id, page)].append(node)
+        if section and node_type != "page":
+            by_doc_section[(doc_id, section)].append(node)
         if node_type == "page":
             page_nodes[(doc_id, page)] = node.get("node_id", "")
         for kind, ref_no in extract_refs(node.get("content", "") + " " + node.get("source_ref", "")):
@@ -62,6 +113,15 @@ def build_edges(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 by_doc_kind_ref[(doc_id, kind, ref_no)].append(node)
 
     edges: list[dict[str, Any]] = []
+    for node in nodes:
+        node_id = node.get("node_id", "")
+        parent_id = clean_text(node.get("parent_chunk_id"))
+        previous_id = clean_text(node.get("previous_node_id"))
+        if parent_id:
+            add_edge(edges, parent_id, node_id, "parent_section", 0.45)
+        if previous_id:
+            add_edge(edges, previous_id, node_id, "chunk_sequence", 0.08)
+
     for (doc_id, page), page_group in by_doc_page.items():
         page_id = page_nodes.get((doc_id, page), "")
         non_page = [node for node in page_group if node.get("node_type") != "page"]
@@ -76,11 +136,22 @@ def build_edges(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for caption in captions:
             text = caption.get("content", "")
             if re.search(r"^(图|圖|Fig|Figure)", text, re.I):
-                for figure in figures:
+                related_figures = [figure for figure in figures if layout_related(caption, figure)] or figures
+                for figure in related_figures:
                     add_edge(edges, caption["node_id"], figure["node_id"], "figure_caption", 1.2)
             if re.search(r"^(表|Table)", text, re.I):
-                for table in tables:
+                related_tables = [table for table in tables if layout_related(caption, table)] or tables
+                for table in related_tables:
                     add_edge(edges, caption["node_id"], table["node_id"], "table_caption", 1.2)
+
+    for (_doc_id, _section), section_group in by_doc_section.items():
+        title_nodes = [node for node in section_group if node.get("node_type") == "title"]
+        content_nodes = [node for node in section_group if node.get("node_type") != "title"]
+        for title in title_nodes[:2]:
+            for node in content_nodes[:30]:
+                add_edge(edges, title.get("node_id", ""), node.get("node_id", ""), "section_title", 0.35)
+        for left, right in zip(content_nodes, content_nodes[1:]):
+            add_edge(edges, left.get("node_id", ""), right.get("node_id", ""), "same_section", 0.12)
 
     for node in nodes:
         node_id = node.get("node_id")

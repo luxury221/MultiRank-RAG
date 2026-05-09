@@ -101,6 +101,8 @@ export interface AppData {
   metrics: MetricRow[];
 }
 
+export type ChunkTemplate = 'auto' | 'general' | 'ai' | 'math' | 'finance' | 'medical';
+
 export type AnalysisRequest =
   | {
       mode: 'system';
@@ -113,12 +115,14 @@ export type AnalysisRequest =
       pdf_name: string;
       question: string;
       file: File;
+      chunk_template: ChunkTemplate;
     };
 
 export interface UploadJobResult {
   question: QuestionItem;
   steps: EvidenceStep[];
   rankings: Record<string, RankingItem[]>;
+  chunk_report?: Record<string, string | number>;
 }
 
 export interface UploadJobStatus {
@@ -128,6 +132,7 @@ export interface UploadJobStatus {
   progress: number;
   pdf_name: string;
   question: string;
+  chunk_template?: ChunkTemplate;
   message?: string;
   logs?: string[];
   error?: string;

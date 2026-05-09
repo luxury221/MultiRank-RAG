@@ -64,6 +64,10 @@ EDGE_PRIORITY = {
     "text_ref_figure": 1.0,
     "table_caption": 0.95,
     "figure_caption": 0.95,
+    "section_title": 0.45,
+    "same_section": 0.35,
+    "parent_section": 0.48,
+    "chunk_sequence": 0.18,
     "same_page": 0.25,
     "belongs_to_page": 0.15,
 }
@@ -339,6 +343,10 @@ def relation_label(edge_types: list[str]) -> str:
         "text_ref_figure": "正文引用图片",
         "table_caption": "表格-表题",
         "figure_caption": "图片-图注",
+        "section_title": "章节标题",
+        "same_section": "同章节补充",
+        "parent_section": "层级父子",
+        "chunk_sequence": "前后文补充",
         "same_page": "同页补充",
         "belongs_to_page": "页面包含",
     }
