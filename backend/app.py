@@ -357,7 +357,6 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
         write_status(job_id, stage="chain", progress=82)
         append_log(job_id, "正在生成证据链")
         g4_rows = [row for row in ranking_rows if row.get("method") == "G4"]
-        question["answer"] = answer_for_question(question, g4_rows)
         graph = build_graph(nodes, edges)
         nodes_by_id = {node.get("node_id", ""): node for node in nodes if node.get("node_id")}
         steps = chain_builder.build_chain_for_question(
@@ -368,6 +367,7 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
             max_steps=int(os.getenv("RAG_BACKEND_MAX_STEPS", "5")),
         )
         write_csv_dicts(job / "chain_steps.csv", steps)
+        question["answer"] = answer_for_question(question, steps or g4_rows)
 
         write_status(job_id, stage="card", progress=92)
         append_log(job_id, "正在生成证据卡片")

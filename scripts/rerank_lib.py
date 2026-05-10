@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import math
 import re
 import time
@@ -14,6 +15,7 @@ from embedding_index import (
     DEFAULT_EMBEDDING_DEVICE,
     DEFAULT_EMBEDDING_MODEL,
     EmbeddingIndex,
+    node_embedding_text,
 )
 from pipeline_common import as_float, clean_text, preview, split_multi
 
@@ -89,6 +91,59 @@ VISUAL_QUESTION_TYPE_TERMS = (
     "\u56fe\u6587\u4e00\u81f4\u6027",
     "\u56fe\u8868\u7406\u89e3",
     "\u8de8\u6a21\u6001\u7efc\u5408",
+)
+
+AFTER_SALES_INTENT_TERMS = {
+    "return_refund": (
+        "7天",
+        "七天",
+        "无理由",
+        "退货",
+        "换货",
+        "退换",
+        "退款",
+        "运费",
+        "return",
+        "refund",
+        "exchange",
+    ),
+    "invoice": ("发票", "开票", "抬头", "税号", "invoice"),
+    "shipping_damage": ("物流", "快递", "运输", "包装破损", "破损", "签收", "包裹", "shipping", "package"),
+    "warranty_repair": ("售后", "保修", "维修", "送修", "人为损坏", "质保", "客服", "warranty", "repair", "service"),
+    "troubleshooting": (
+        "故障",
+        "异常",
+        "无法",
+        "不能",
+        "不工作",
+        "没反应",
+        "报错",
+        "重启",
+        "漏水",
+        "噪音",
+        "充电",
+        "开机",
+        "troubleshoot",
+        "error",
+        "fault",
+    ),
+    "usage_operation": ("如何", "怎么", "步骤", "安装", "设置", "清洁", "使用", "连接", "校准", "operation", "setup"),
+    "spec_parts": ("规格", "参数", "尺寸", "电压", "容量", "配件", "清单", "型号", "spec", "parts"),
+    "safety": ("安全", "警告", "注意", "危险", "儿童", "火灾", "触电", "烫伤", "safety", "warning"),
+}
+
+AFTER_SALES_MANUAL_HINTS = (
+    "售后",
+    "客服",
+    "保修",
+    "维修",
+    "手册",
+    "说明书",
+    "manual",
+    "after-sales",
+    "customer service",
+    "datafountain_customer_service",
+    "manual_qa",
 )
 
 SECTION_QUERY_HINTS = {
@@ -330,7 +385,7 @@ def fusion_scores(
     embedding_device: str = DEFAULT_EMBEDDING_DEVICE,
     embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
 ) -> dict[str, float]:
-    nodes = [node for node in nodes if clean_text(node.get("node_id")) and clean_text(node.get("content"))]
+    nodes = [node for node in nodes if clean_text(node.get("node_id")) and node_embedding_text(node)]
     node_ids = [clean_text(node.get("node_id")) for node in nodes]
     if not nodes:
         return {}
@@ -373,7 +428,7 @@ def similarity_scores(
     embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
     hybrid_alpha: float = 0.7,
 ) -> dict[str, float]:
-    nodes = [node for node in nodes if clean_text(node.get("node_id")) and clean_text(node.get("content"))]
+    nodes = [node for node in nodes if clean_text(node.get("node_id")) and node_embedding_text(node)]
     if not nodes:
         return {}
 
@@ -530,6 +585,84 @@ def question_intent(question: dict[str, Any]) -> dict[str, bool]:
     }
 
 
+def after_sales_intents(question: dict[str, Any]) -> dict[str, float]:
+    blob = _question_blob(question)
+    scores: dict[str, float] = {}
+    for intent, terms in AFTER_SALES_INTENT_TERMS.items():
+        hits = sum(1 for term in terms if term.casefold() in blob)
+        if hits:
+            scores[intent] = min(1.0, 0.35 + 0.18 * hits)
+    if not scores and _contains_any(blob, AFTER_SALES_MANUAL_HINTS):
+        scores["general_after_sales"] = 0.45
+    return scores
+
+
+def is_after_sales_question(question: dict[str, Any]) -> bool:
+    return bool(after_sales_intents(question))
+
+
+def node_after_sales_blob(node: dict[str, Any]) -> str:
+    return clean_text(
+        " ".join(
+            [
+                node.get("paper_domain", ""),
+                node.get("chunk_template", ""),
+                node.get("requested_chunk_template", ""),
+                node.get("doc_id", ""),
+                node.get("section", ""),
+                node.get("node_type", ""),
+                node.get("source_ref", ""),
+                node.get("visual_summary", ""),
+                node.get("previous_chunk_preview", ""),
+                node.get("content", ""),
+                node.get("next_chunk_preview", ""),
+            ]
+        )
+    ).casefold()
+
+
+def after_sales_domain_scores(
+    question: dict[str, Any],
+    nodes_by_id: dict[str, dict[str, Any]],
+    candidate_ids: list[str],
+) -> dict[str, float]:
+    intent_scores = after_sales_intents(question)
+    if not intent_scores:
+        return {node_id: 0.0 for node_id in candidate_ids}
+
+    query_terms = []
+    for intent in intent_scores:
+        query_terms.extend(AFTER_SALES_INTENT_TERMS.get(intent, ()))
+    query_terms.append(question.get("question", ""))
+    raw_query = " ".join(query_terms)
+    raw_scores = lexical_similarity(raw_query, [node_after_sales_blob(nodes_by_id.get(node_id, {})) for node_id in candidate_ids])
+
+    scores: dict[str, float] = {}
+    for node_id, semantic in zip(candidate_ids, raw_scores):
+        node = nodes_by_id.get(node_id, {})
+        blob = node_after_sales_blob(node)
+        node_type = clean_text(node.get("node_type")) or "text"
+        matched_intents = [
+            intent
+            for intent, terms in AFTER_SALES_INTENT_TERMS.items()
+            if any(term.casefold() in blob for term in terms)
+        ]
+        policy_or_manual_bonus = 0.0
+        if _contains_any(blob, AFTER_SALES_MANUAL_HINTS):
+            policy_or_manual_bonus += 0.12
+        if clean_text(node.get("paper_domain")) == "after_sales_knowledge_base":
+            policy_or_manual_bonus += 0.18
+        if clean_text(node.get("structure_type")) in {"after_sales_policy", "manual_profile"}:
+            policy_or_manual_bonus += 0.12
+        if node_type == "title":
+            policy_or_manual_bonus += 0.04
+        if matched_intents:
+            strongest = max(intent_scores.get(intent, 0.0) for intent in matched_intents)
+            policy_or_manual_bonus += 0.25 * strongest
+        scores[node_id] = max(0.0, 0.65 * semantic + policy_or_manual_bonus)
+    return scores
+
+
 def visual_text_for_node(node: dict[str, Any]) -> str:
     parts: list[str] = []
     for field in VISUAL_TEXT_FIELDS:
@@ -614,6 +747,110 @@ def visual_grounding_scores(
 
         scores[node_id] = max(0.0, 0.65 * semantic + type_bonus + evidence_bonus + neighbor_bonus)
     return scores
+
+
+def chain_coherence_scores(
+    question: dict[str, Any],
+    nodes_by_id: dict[str, dict[str, Any]],
+    graph: nx.Graph,
+    candidate_ids: list[str],
+    sim_scores: dict[str, float],
+) -> dict[str, float]:
+    if not candidate_ids:
+        return {}
+    intent = question_intent(question)
+    after_sales = after_sales_intents(question)
+    scores: dict[str, float] = {}
+    strong_edges = {
+        "text_ref_table",
+        "text_ref_figure",
+        "table_caption",
+        "figure_caption",
+        "section_title",
+        "parent_section",
+    }
+    useful_sequence_edges = {"chunk_sequence", "same_section", "same_page"}
+
+    for node_id in candidate_ids:
+        node = nodes_by_id.get(node_id, {})
+        if _looks_like_toc_entry(node.get("content", "")):
+            scores[node_id] = 0.0
+            continue
+        if node_id not in graph:
+            scores[node_id] = 0.0
+            continue
+
+        node_doc = clean_text(node.get("doc_id"))
+        node_section = clean_text(node.get("section"))
+        node_type = clean_text(node.get("node_type")) or "text"
+        neighbor_types: set[str] = set()
+        relation_score = 0.0
+        semantic_support = 0.0
+        same_context_support = 0.0
+
+        for neighbor in graph.neighbors(node_id):
+            neighbor_node = nodes_by_id.get(neighbor, {})
+            if not neighbor_node or _looks_like_toc_entry(neighbor_node.get("content", "")):
+                continue
+            neighbor_type = clean_text(neighbor_node.get("node_type")) or "text"
+            neighbor_types.add(neighbor_type)
+            edge_data = graph.get_edge_data(node_id, neighbor, default={})
+            edge_types = set(edge_data.get("edge_types") or [edge_data.get("edge_type", "related")])
+            edge_weight = as_float(edge_data.get("weight"), 1.0)
+            if edge_types & strong_edges:
+                relation_score += 0.22 * min(edge_weight, 2.0)
+            elif edge_types & useful_sequence_edges:
+                relation_score += 0.08 * min(edge_weight, 2.0)
+            semantic_support = max(semantic_support, max(sim_scores.get(neighbor, 0.0), 0.0))
+            if clean_text(neighbor_node.get("doc_id")) == node_doc:
+                same_context_support += 0.03
+            if node_section and clean_text(neighbor_node.get("section")) == node_section:
+                same_context_support += 0.04
+
+        modality_coverage = 0.0
+        if intent["table"] and "table" in neighbor_types:
+            modality_coverage += 0.22
+        if intent["figure"] and ({"figure", "caption"} & neighbor_types):
+            modality_coverage += 0.22
+        if intent["cross"] and len(neighbor_types & {"text", "table", "figure", "caption"}) >= 2:
+            modality_coverage += 0.25
+        if after_sales and ({"title", "text", "figure"} & neighbor_types):
+            modality_coverage += 0.12
+        if node_type in {"page", "title"} and not after_sales:
+            modality_coverage *= 0.65
+
+        scores[node_id] = max(
+            0.0,
+            min(
+                1.0,
+                0.45 * min(relation_score, 1.0)
+                + 0.3 * semantic_support
+                + 0.15 * min(same_context_support, 1.0)
+                + modality_coverage,
+            ),
+        )
+    return scores
+
+
+def chain_signal_weight(question: dict[str, Any], chain_raw: dict[str, float]) -> float:
+    if not any(score > 0 for score in chain_raw.values()):
+        return 0.0
+    intent = question_intent(question)
+    if is_after_sales_question(question):
+        return 0.09
+    if intent["cross"] or intent["table"] or intent["figure"]:
+        return 0.08
+    if intent["location"]:
+        return 0.06
+    if intent["text_fact"]:
+        return 0.025
+    return 0.04
+
+
+def after_sales_signal_weight(question: dict[str, Any], domain_raw: dict[str, float]) -> float:
+    if not after_sales_intents(question) or not any(score > 0 for score in domain_raw.values()):
+        return 0.0
+    return 0.11
 
 
 def _reference_weight(node_type: str, refs: set[tuple[str, str]]) -> float:
@@ -799,7 +1036,7 @@ def retrieve_candidates(
     hybrid_alpha: float = 0.7,
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
     doc_id = clean_text(question.get("doc_id"))
-    pool = [node for node in nodes if clean_text(node.get("content"))]
+    pool = [node for node in nodes if node_embedding_text(node)]
     if doc_id:
         filtered = [node for node in pool if clean_text(node.get("doc_id")) == doc_id]
         if filtered:
@@ -941,7 +1178,7 @@ def rank_question(
     nodes_by_id = {node["node_id"]: node for node in nodes if node.get("node_id")}
     graph = build_graph(nodes, edges)
     doc_id = clean_text(question.get("doc_id"))
-    similarity_pool = [node for node in nodes if clean_text(node.get("content"))]
+    similarity_pool = [node for node in nodes if node_embedding_text(node)]
     if doc_id:
         doc_nodes = [node for node in similarity_pool if clean_text(node.get("doc_id")) == doc_id]
         if doc_nodes:
@@ -993,6 +1230,10 @@ def rank_question(
     ref_norm = normalize_scores(ref_raw, candidate_ids)
     visual_raw = visual_grounding_scores(question, nodes_by_id, graph, candidate_ids)
     visual_norm = normalize_scores(visual_raw, candidate_ids)
+    chain_raw = chain_coherence_scores(question, nodes_by_id, graph, candidate_ids, sim_scores)
+    chain_norm = normalize_scores(chain_raw, candidate_ids)
+    domain_raw = after_sales_domain_scores(question, nodes_by_id, candidate_ids)
+    domain_norm = normalize_scores(domain_raw, candidate_ids)
     original_norm = normalize_scores(original_scores, candidate_ids)
     graph_mix = graph_signal_multipliers(question)
     ppr_multiplier = max(0.0, min(1.0, graph_mix.get("ppr", 0.0)))
@@ -1015,11 +1256,22 @@ def rank_question(
         for node_id in candidate_ids
     }
     visual_weight = visual_signal_weight(question, visual_raw)
-    g4_scores = {
-        node_id: g3_scores.get(node_id, 0.0)
-        + visual_weight * visual_norm.get(node_id, 0.0) * max(0.05, 1.0 - g3_scores.get(node_id, 0.0))
-        for node_id in candidate_ids
-    }
+    chain_weight = chain_signal_weight(question, chain_raw)
+    domain_weight = after_sales_signal_weight(question, domain_raw)
+    g4_scores: dict[str, float] = {}
+    domain_blend = min(0.22, domain_weight * 2.0) if domain_weight > 0 else 0.0
+    for node_id in candidate_ids:
+        base = g3_scores.get(node_id, 0.0)
+        remaining = max(0.05, 1.0 - base)
+        raw_score = (
+            base
+            + visual_weight * visual_norm.get(node_id, 0.0) * remaining
+            + chain_weight * chain_norm.get(node_id, 0.0) * remaining
+            + domain_weight * domain_norm.get(node_id, 0.0) * remaining
+        )
+        if domain_blend:
+            raw_score = (1.0 - domain_blend) * raw_score + domain_blend * domain_norm.get(node_id, 0.0)
+        g4_scores[node_id] = min(1.0, max(0.0, raw_score))
 
     method_rankings: dict[str, list[tuple[str, float]]] = {
         "G0": [(node_id, original_norm.get(node_id, 0.0)) for node_id in candidate_ids],
@@ -1072,6 +1324,12 @@ def rank_question(
                     "bridge_score": round(bridge_norm.get(node_id, 0.0), 6),
                     "ref_score": round(ref_norm.get(node_id, 0.0), 6),
                     "visual_score": round(visual_norm.get(node_id, 0.0), 6),
+                    "chain_score": round(chain_norm.get(node_id, 0.0), 6),
+                    "domain_score": round(domain_norm.get(node_id, 0.0), 6),
+                    "rerank_profile": (
+                        f"visual={visual_weight:.3f};chain={chain_weight:.3f};"
+                        f"after_sales={domain_weight:.3f}"
+                    ),
                     "has_visual_crop": int(node_has_visual_crop(node)),
                     "has_visual_caption": int(node_has_visual_caption(node)),
                     "visual_title": preview(node.get("visual_title", ""), 80),
@@ -1119,15 +1377,102 @@ def neighbor_relations(
     return relations
 
 
-def answer_for_question(question: dict[str, Any], top_rows: list[dict[str, Any]]) -> str:
-    answer = clean_text(question.get("answer"))
-    if answer:
-        return answer
+def _evidence_for_answer(top_rows: list[dict[str, Any]], max_items: int = 6) -> str:
+    blocks: list[str] = []
+    for index, row in enumerate(top_rows[:max_items], start=1):
+        text = clean_text(row.get("content_preview") or row.get("content") or "")
+        visual = clean_text(row.get("visual_caption") or row.get("visual_summary") or row.get("qa_evidence") or "")
+        reason = clean_text(row.get("reason"))
+        parts = [
+            f"[{index}] page={row.get('page', '')} type={row.get('node_type', '')} "
+            f"score={row.get('score', '')} source={row.get('source_ref', '')}",
+        ]
+        if text:
+            parts.append(f"text: {text}")
+        if visual:
+            parts.append(f"visual: {visual}")
+        if reason:
+            parts.append(f"reason: {reason}")
+        blocks.append("\n".join(parts))
+    return "\n\n".join(blocks)
+
+
+def is_mostly_english(text: Any) -> bool:
+    text = clean_text(text)
+    letters = sum(1 for ch in text if ch.isascii() and ch.isalpha())
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    return letters > max(20, cjk * 2)
+
+
+def _fallback_answer_for_question(question: dict[str, Any], top_rows: list[dict[str, Any]]) -> str:
     if not top_rows:
         return "No answer available because no evidence was retrieved."
     first = top_rows[0]
     return (
         f"Likely answer evidence is on page {first.get('page')} "
         f"from {first.get('node_type')} node {first.get('node_id')}: "
-        f"{first.get('content_preview')}"
+        f"{first.get('content_preview') or first.get('content') or ''}"
     )
+
+
+def answer_for_question(question: dict[str, Any], top_rows: list[dict[str, Any]]) -> str:
+    answer = clean_text(question.get("answer"))
+    if answer:
+        return answer
+    if not top_rows:
+        return _fallback_answer_for_question(question, top_rows)
+
+    try:
+        from ark_clients import ArkChatClient, ArkError, get_env
+
+        provider = (os.getenv("RAG_ANSWER_PROVIDER", "").strip() or get_env("RAG_ANSWER_PROVIDER", "ark")).lower()
+        if provider in {"", "off", "none", "local", "fallback"}:
+            return _fallback_answer_for_question(question, top_rows)
+        model = (
+            get_env("RAG_ANSWER_MODEL", "")
+            or get_env("ARK_TEXT_MODEL_PRO")
+            or get_env("ARK_TEXT_MODEL")
+            or get_env("ARK_MODEL")
+        )
+        if not model:
+            return _fallback_answer_for_question(question, top_rows)
+        chat = ArkChatClient(model=model)
+        language_rule = "Answer in English." if is_mostly_english(question.get("question", "")) else "请用中文回答。"
+        system_prompt = (
+            "You are the final answer generator in a multimodal RAG evidence system. "
+            "Answer directly from the supplied evidence. Prefer concrete steps, parts, "
+            "conditions, numbers, and visual/table cues. Do not mention internal rank IDs, "
+            "G4, rerank, or that evidence is insufficient unless the evidence truly cannot answer."
+        )
+        user_prompt = f"""Question:
+{question.get('question', '')}
+
+Evidence:
+{_evidence_for_answer(top_rows)}
+
+Requirements:
+1. {language_rule}
+2. Give a concise but complete final answer for the user.
+3. If the question asks how to operate, use clear steps.
+4. If visual or table evidence is relevant, explicitly say what the image/table shows.
+5. Keep Chinese answers around 120-300 characters and English answers around 80-180 words."""
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                return clean_text(
+                    chat.complete(
+                        system_prompt,
+                        user_prompt,
+                        temperature=float(os.getenv("RAG_ANSWER_TEMPERATURE", "0.12")),
+                        max_tokens=int(os.getenv("RAG_ANSWER_MAX_TOKENS", "700")),
+                    )
+                )
+            except (ArkError, Exception) as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+        if last_error:
+            return _fallback_answer_for_question(question, top_rows)
+    except Exception:
+        return _fallback_answer_for_question(question, top_rows)
+    return _fallback_answer_for_question(question, top_rows)

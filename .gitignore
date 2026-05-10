@@ -47,6 +47,7 @@ outputs/
 data/pdfs/*.pdf
 data/pdfs/**/*.pdf
 data/uploads/
+DataFountain/
 *.docx
 *.pptx
 *.xlsx
