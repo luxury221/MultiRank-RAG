@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -1417,20 +1419,151 @@ def node_type_for_block(block: str, chunk_strategy: str = "", template: PaperChu
     return "text"
 
 
-def content_list_to_nodes(content_list_path: Path) -> list[dict[str, Any]]:
+def flatten_mineru_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return clean_text(value)
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return clean_text("\n".join(flatten_mineru_value(item) for item in value if flatten_mineru_value(item)))
+    if isinstance(value, dict):
+        preferred = [
+            value.get("text"),
+            value.get("content"),
+            value.get("html"),
+            value.get("latex"),
+            value.get("paragraph_content"),
+            value.get("table_body"),
+            value.get("table_data"),
+            value.get("table_caption"),
+            value.get("image_caption"),
+            value.get("chart_caption"),
+            value.get("image_path"),
+            value.get("img_path"),
+        ]
+        text = "\n".join(flatten_mineru_value(item) for item in preferred if flatten_mineru_value(item))
+        return text or clean_text(json.dumps(value, ensure_ascii=False))
+    return clean_text(value)
+
+
+def mineru_item_page(item: dict[str, Any]) -> int:
+    if "page_idx" in item:
+        return int(item.get("page_idx") or 0) + 1
+    if "page_index" in item:
+        return int(item.get("page_index") or 0) + 1
+    return max(1, int(item.get("page") or item.get("page_no") or 1))
+
+
+def mineru_item_node_type(item: dict[str, Any], content: str, template: PaperChunkTemplate) -> str:
+    raw_type = clean_text(
+        item.get("type")
+        or item.get("block_type")
+        or item.get("category_type")
+        or item.get("category")
+        or item.get("label")
+        or "text"
+    ).lower()
+    normalized = raw_type.replace("-", "_").replace(" ", "_")
+    if normalized in {"image", "image_body", "figure", "figure_body", "chart", "chart_body"}:
+        return "figure"
+    if normalized in {"table", "table_body"}:
+        return "table"
+    if normalized in {"image_caption", "table_caption", "chart_caption", "caption"}:
+        return "caption"
+    if normalized in {"equation", "interline_equation", "inline_equation", "formula"}:
+        return "equation"
+    if normalized in {"title", "doc_title"}:
+        return "title"
+    return node_type_for_block(content, template=template)
+
+
+def mineru_item_image_path(item: dict[str, Any], content_list_path: Path) -> str:
+    value = clean_text(item.get("image_path") or item.get("img_path") or item.get("path") or "")
+    if not value or re.match(r"^(https?|data):", value, flags=re.I):
+        return value
+    path = Path(value)
+    if not path.is_absolute():
+        path = content_list_path.parent / path
+    return str(path)
+
+
+def mineru_item_content(item: dict[str, Any], content_list_path: Path) -> str:
+    parts = [
+        item.get("text"),
+        item.get("content"),
+        item.get("html"),
+        item.get("table_body"),
+        item.get("table_data"),
+        item.get("table_caption"),
+        item.get("table_footnote"),
+        item.get("image_caption"),
+        item.get("image_footnote"),
+        item.get("chart_caption"),
+        item.get("chart_footnote"),
+        item.get("latex"),
+    ]
+    image_path = mineru_item_image_path(item, content_list_path)
+    if image_path:
+        parts.append(f"Image path: {image_path}")
+    return clean_text("\n".join(flatten_mineru_value(part) for part in parts if flatten_mineru_value(part)))
+
+
+def load_mineru_items(content_list_path: Path) -> tuple[list[dict[str, Any]], str]:
     payload = json.loads(content_list_path.read_text(encoding="utf-8"))
     if isinstance(payload, dict):
-        items = payload.get("content_list") or payload.get("items") or []
+        items = payload.get("content_list") or payload.get("items") or payload.get("pages") or []
         source_name = payload.get("file_path") or payload.get("doc_id") or content_list_path.stem
     else:
         items = payload
         source_name = content_list_path.stem
+    if items and isinstance(items[0], list):
+        flattened: list[dict[str, Any]] = []
+        for page_index, page_blocks in enumerate(items):
+            for block in page_blocks:
+                if isinstance(block, dict):
+                    block.setdefault("page_idx", page_index)
+                    flattened.append(block)
+        items = flattened
+    if items and isinstance(items[0], dict) and "blocks" in items[0]:
+        flattened: list[dict[str, Any]] = []
+        for page_index, page in enumerate(items):
+            for block in page.get("blocks") or []:
+                if isinstance(block, dict):
+                    block.setdefault("page_idx", page.get("page_idx", page.get("page", page_index)))
+                    flattened.append(block)
+        items = flattened
+    return [item for item in items if isinstance(item, dict)], str(source_name)
+
+
+def content_list_to_nodes(
+    content_list_path: Path,
+    chunk_template: str = "auto",
+    chunk_size: int = 900,
+    source_pdf_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    items, source_name = load_mineru_items(content_list_path)
+    if source_pdf_path:
+        source_name = source_pdf_path.name
     doc_id = normalize_doc_id(str(source_name))
+    text_pages_by_index: dict[int, list[str]] = {}
+    for item in items:
+        content = mineru_item_content(item, content_list_path)
+        if content:
+            text_pages_by_index.setdefault(mineru_item_page(item), []).append(content)
+    pages = ["\n".join(text_pages_by_index[index]) for index in sorted(text_pages_by_index)]
+    decision = chunk_template_decision(chunk_template, source_pdf_path or Path(source_name), pages)
+    template = decision.template
+    template_meta = decision_metadata(decision)
+    resolved_chunk_size = effective_chunk_size(template, chunk_size)
     counters: dict[tuple[str, int], int] = {}
     nodes: list[dict[str, Any]] = []
     page_seen: set[int] = set()
+    active_section = ""
+    active_section_id = ""
     for item in items:
-        page = int(item.get("page_idx", item.get("page", 0))) + 1
+        page = mineru_item_page(item)
         if page not in page_seen:
             page_seen.add(page)
             nodes.append(
@@ -1440,41 +1573,132 @@ def content_list_to_nodes(content_list_path: Path) -> list[dict[str, Any]]:
                     "page": page,
                     "node_type": "page",
                     "content": f"Page {page} of {doc_id}",
-                    "source_ref": f"page {page}",
+                    "source_ref": f"{source_name} page {page}",
+                    **template_meta,
+                    "section": active_section,
+                    "section_id": active_section_id,
+                    "parent_chunk_id": "",
+                    "chunk_level": "page",
+                    "structure_type": "page",
+                    "layout_parser": "mineru",
                 }
             )
-        raw_type = str(item.get("type", "text")).lower()
-        node_type = {
-            "image": "figure",
-            "figure": "figure",
-            "table": "table",
-            "equation": "equation",
-            "text": "text",
-        }.get(raw_type, "text")
-        parts = [
-            item.get("text"),
-            item.get("content"),
-            item.get("table_body"),
-            item.get("table_data"),
-            " ".join(item.get("image_caption") or []),
-            " ".join(item.get("table_caption") or []),
-            item.get("latex"),
-        ]
-        content = clean_text("\n".join(str(part) for part in parts if part))
+        content = mineru_item_content(item, content_list_path)
         if not content:
             continue
-        counters[(node_type, page)] = counters.get((node_type, page), 0) + 1
-        nodes.append(
-            {
-                "node_id": make_node_id(node_type, doc_id, page, counters[(node_type, page)]),
+        node_type = mineru_item_node_type(item, content, template)
+        chunks = [content]
+        if node_type == "text":
+            chunks = split_long_block(content, resolved_chunk_size)
+        for chunk in chunks:
+            node_type_for_chunk = node_type_for_block(chunk, template=template) if node_type == "text" else node_type
+            counters[(node_type_for_chunk, page)] = counters.get((node_type_for_chunk, page), 0) + 1
+            node_id = make_node_id(node_type_for_chunk, doc_id, page, counters[(node_type_for_chunk, page)])
+            section = active_section
+            section_id = active_section_id
+            if node_type_for_chunk == "title":
+                section = clean_text(normalize_heading_text(chunk))
+                active_section = section
+                active_section_id = node_id
+                section_id = active_section_id
+            parent_chunk_id = "" if node_type_for_chunk == "title" else active_section_id
+            node = {
+                "node_id": node_id,
                 "doc_id": doc_id,
                 "page": page,
-                "node_type": node_type,
-                "content": content,
-                "source_ref": f"page {page} {node_type}",
+                "node_type": node_type_for_chunk,
+                "content": chunk,
+                "source_ref": f"{source_name} page {page} {node_type_for_chunk}",
+                **template_meta,
+                "section": section,
+                "section_id": section_id,
+                "parent_chunk_id": parent_chunk_id,
+                "chunk_level": "section" if node_type_for_chunk == "title" else "block",
+                "chunk_strategy": "mineru_content_list",
+                "structure_type": "section_title" if node_type_for_chunk == "title" else infer_structure_type(chunk, template),
+                "layout_parser": "mineru",
+                "layout_role": clean_text(item.get("type") or item.get("block_type") or node_type_for_chunk),
+                "bbox": bbox_to_json(item.get("bbox", [])),
+                "bbox_source": "mineru",
             }
-        )
+            image_path = mineru_item_image_path(item, content_list_path)
+            if image_path and node_type_for_chunk in {"figure", "table", "caption"}:
+                node["image_path"] = image_path
+                node["crop_image_path"] = image_path
+            nodes.append(node)
     return enrich_node_context(nodes)
+
+
+def find_mineru_content_list(output_dir: Path, pdf_path: Path | None = None) -> Path | None:
+    if not output_dir.exists():
+        return None
+    stems = []
+    if pdf_path:
+        stems = [pdf_path.stem, normalize_doc_id(pdf_path.name), normalize_doc_id(pdf_path.stem)]
+    patterns = ["*_content_list_v2.json", "*_content_list.json", "content_list_v2.json", "content_list.json"]
+    candidates: list[Path] = []
+    for pattern in patterns:
+        candidates.extend(output_dir.rglob(pattern))
+    candidates = sorted(dict.fromkeys(candidates), key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
+    if not stems:
+        return candidates[0] if candidates else None
+    for candidate in candidates:
+        name_blob = " ".join([candidate.name, candidate.parent.name, str(candidate.parent)])
+        if any(stem and stem in name_blob for stem in stems):
+            return candidate
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def run_mineru(
+    pdf_path: Path,
+    output_dir: Path,
+    backend: str = "pipeline",
+    method: str = "auto",
+    lang: str = "",
+    api_url: str = "",
+) -> Path:
+    mineru_exe = os.getenv("MINERU_BIN") or shutil.which("mineru")
+    if not mineru_exe:
+        raise RuntimeError(
+            "MinerU is not installed or `mineru` is not on PATH. "
+            'Install it with: pip install uv && uv pip install -U "mineru[all]"'
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    existing = find_mineru_content_list(output_dir, pdf_path)
+    if existing and os.getenv("RAG_MINERU_FORCE", "0") not in {"1", "true", "yes"}:
+        return existing
+    api_url = api_url or os.getenv("MINERU_API_URL", "")
+    cmd = [mineru_exe, "-p", str(pdf_path), "-o", str(output_dir), "-b", backend, "-m", method]
+    if api_url:
+        cmd.extend(["--api-url", api_url])
+    if lang:
+        cmd.extend(["-l", lang])
+    extra = clean_text(os.getenv("MINERU_EXTRA_ARGS", ""))
+    if extra:
+        cmd.extend(extra.split())
+    env = os.environ.copy()
+    if os.getenv("MINERU_MODEL_SOURCE"):
+        env["MINERU_MODEL_SOURCE"] = os.getenv("MINERU_MODEL_SOURCE", "")
+    print(">", " ".join(cmd))
+    subprocess.run(cmd, check=True, env=env)
+    content_list = find_mineru_content_list(output_dir, pdf_path)
+    if not content_list:
+        raise RuntimeError(f"MinerU finished but no content_list JSON was found under {output_dir}.")
+    return content_list
+
+
+def mineru_pdf_to_nodes(
+    pdf_path: Path,
+    output_dir: Path,
+    chunk_size: int = 900,
+    chunk_template: str = "auto",
+    backend: str = "pipeline",
+    method: str = "auto",
+    lang: str = "",
+    api_url: str = "",
+) -> list[dict[str, Any]]:
+    content_list = run_mineru(pdf_path, output_dir, backend=backend, method=method, lang=lang, api_url=api_url)
+    return content_list_to_nodes(content_list, chunk_template=chunk_template, chunk_size=chunk_size, source_pdf_path=pdf_path)
 
 
 def decision_metadata(decision: TemplateDecision) -> dict[str, Any]:
@@ -1881,11 +2105,26 @@ def load_manual_nodes(path: Path) -> list[dict[str, Any]]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Parse PDFs or RAG-Anything content_list into evidence nodes.")
+    parser = argparse.ArgumentParser(description="Parse PDFs with MinerU or content_list into evidence nodes.")
     parser.add_argument("--pdf-dir", default="data/pdfs")
-    parser.add_argument("--content-list", default="", help="Optional RAG-Anything content_list JSON.")
+    parser.add_argument("--content-list", default="", help="Optional MinerU/RAG-Anything content_list JSON.")
     parser.add_argument("--manual-nodes", default="data/manual_nodes.csv")
     parser.add_argument("--output", default=str(DEFAULT_NODES.relative_to(DEFAULT_NODES.parents[2])))
+    parser.add_argument(
+        "--parser",
+        choices=["mineru", "native"],
+        default=os.getenv("RAG_PDF_PARSER", "mineru"),
+        help="PDF parser backend. mineru is the default; native keeps the old PyMuPDF/pdfplumber path.",
+    )
+    parser.add_argument("--mineru-output-dir", default=os.getenv("RAG_MINERU_OUTPUT_DIR", "outputs/mineru"))
+    parser.add_argument("--mineru-api-url", default=os.getenv("MINERU_API_URL", ""), help="Optional existing MinerU FastAPI base URL.")
+    parser.add_argument(
+        "--mineru-backend",
+        default=os.getenv("MINERU_BACKEND", "pipeline"),
+        help="MinerU backend, e.g. pipeline, hybrid-auto-engine, vlm-auto-engine.",
+    )
+    parser.add_argument("--mineru-method", default=os.getenv("MINERU_METHOD", "auto"), help="MinerU method: auto, txt, or ocr.")
+    parser.add_argument("--mineru-lang", default=os.getenv("MINERU_LANG", ""), help="Optional MinerU OCR language.")
     parser.add_argument("--chunk-size", type=int, default=900)
     parser.add_argument(
         "--chunk-template",
@@ -1899,11 +2138,31 @@ def main() -> None:
     nodes: list[dict[str, Any]] = []
 
     if args.content_list:
-        nodes.extend(content_list_to_nodes(resolve_path(args.content_list)))
+        nodes.extend(
+            content_list_to_nodes(
+                resolve_path(args.content_list),
+                chunk_template=args.chunk_template,
+                chunk_size=args.chunk_size,
+            )
+        )
 
     pdf_dir = resolve_path(args.pdf_dir)
     for pdf_path in sorted(pdf_dir.glob("*.pdf")):
-        nodes.extend(pdf_to_nodes(pdf_path, chunk_size=args.chunk_size, chunk_template=args.chunk_template))
+        if args.parser == "mineru":
+            nodes.extend(
+                mineru_pdf_to_nodes(
+                    pdf_path,
+                    output_dir=resolve_path(args.mineru_output_dir),
+                    chunk_size=args.chunk_size,
+                    chunk_template=args.chunk_template,
+                    backend=args.mineru_backend,
+                    method=args.mineru_method,
+                    lang=args.mineru_lang,
+                    api_url=args.mineru_api_url,
+                )
+            )
+        else:
+            nodes.extend(pdf_to_nodes(pdf_path, chunk_size=args.chunk_size, chunk_template=args.chunk_template))
 
     manual_path = resolve_path(args.manual_nodes)
     nodes.extend(load_manual_nodes(manual_path))

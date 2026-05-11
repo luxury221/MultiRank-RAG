@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +26,17 @@ def main() -> None:
     parser.add_argument("--candidate-k", type=int, default=50, help="Candidate pool size before reranking.")
     parser.add_argument("--rerank-k", type=int, default=None, help="Final rows kept per method after reranking.")
     parser.add_argument("--skip-parse", action="store_true")
+    parser.add_argument(
+        "--parser",
+        choices=["mineru", "native"],
+        default=os.getenv("RAG_PDF_PARSER", "mineru"),
+        help="PDF parser backend used by scripts/01_parse_pdf.py.",
+    )
+    parser.add_argument("--mineru-output-dir", default=os.getenv("RAG_MINERU_OUTPUT_DIR", "outputs/mineru"))
+    parser.add_argument("--mineru-api-url", default=os.getenv("MINERU_API_URL", ""))
+    parser.add_argument("--mineru-backend", default=os.getenv("MINERU_BACKEND", "pipeline"))
+    parser.add_argument("--mineru-method", default=os.getenv("MINERU_METHOD", "auto"))
+    parser.add_argument("--mineru-lang", default=os.getenv("MINERU_LANG", ""))
     parser.add_argument(
         "--chunk-template",
         choices=["auto", "general", "ai", "math", "finance", "medical"],
@@ -82,16 +94,27 @@ def main() -> None:
         questions = args.questions
         edges = "outputs/parsed/edges.jsonl"
         if not args.skip_parse:
-            run_step(
-                [
-                    py,
-                    "scripts/01_parse_pdf.py",
-                    "--chunk-template",
-                    args.chunk_template,
-                    "--chunk-size",
-                    str(args.chunk_size),
-                ]
-            )
+            parse_step = [
+                py,
+                "scripts/01_parse_pdf.py",
+                "--parser",
+                args.parser,
+                "--mineru-output-dir",
+                args.mineru_output_dir,
+                "--mineru-api-url",
+                args.mineru_api_url,
+                "--mineru-backend",
+                args.mineru_backend,
+                "--mineru-method",
+                args.mineru_method,
+                "--chunk-template",
+                args.chunk_template,
+                "--chunk-size",
+                str(args.chunk_size),
+            ]
+            if args.mineru_lang:
+                parse_step.extend(["--mineru-lang", args.mineru_lang])
+            run_step(parse_step)
             run_step([py, "scripts/14_chunk_quality_report.py", "--nodes", nodes])
         if not args.skip_visual:
             visual_step = [

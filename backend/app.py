@@ -296,11 +296,24 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
         }
         write_single_question(job, question)
 
-        nodes = parse_pdf.pdf_to_nodes(
-            pdf_path,
-            chunk_size=int(os.getenv("RAG_BACKEND_CHUNK_SIZE", "900")),
-            chunk_template=chunk_template or os.getenv("RAG_BACKEND_CHUNK_TEMPLATE", "auto"),
-        )
+        parser_backend = os.getenv("RAG_PDF_PARSER", "mineru").strip().lower()
+        if parser_backend == "native":
+            nodes = parse_pdf.pdf_to_nodes(
+                pdf_path,
+                chunk_size=int(os.getenv("RAG_BACKEND_CHUNK_SIZE", "900")),
+                chunk_template=chunk_template or os.getenv("RAG_BACKEND_CHUNK_TEMPLATE", "auto"),
+            )
+        else:
+            nodes = parse_pdf.mineru_pdf_to_nodes(
+                pdf_path,
+                output_dir=job / "mineru",
+                chunk_size=int(os.getenv("RAG_BACKEND_CHUNK_SIZE", "900")),
+                chunk_template=chunk_template or os.getenv("RAG_BACKEND_CHUNK_TEMPLATE", "auto"),
+                backend=os.getenv("MINERU_BACKEND", "pipeline"),
+                method=os.getenv("MINERU_METHOD", "auto"),
+                lang=os.getenv("MINERU_LANG", ""),
+                api_url=os.getenv("MINERU_API_URL", ""),
+            )
         write_jsonl(job / "nodes.raw.jsonl", nodes)
         chunk_report_rows = chunk_reporter.build_report(nodes)
         write_csv_dicts(job / "chunk_quality.csv", chunk_report_rows)

@@ -77,18 +77,33 @@ doubao-2.0-pro 答案生成
 
 解析入口位于 `scripts/01_parse_pdf.py`。
 
-系统支持两种来源：
+当前系统默认使用 MinerU 作为 PDF 解析后端。旧的 `PyMuPDF/pdfplumber` 解析器仍保留为 `native` 兜底路径，但不再作为默认路径。
 
-- 直接解析 PDF。
-- 接入 RAG-Anything/MinerU 导出的 `content_list` JSON。
+系统支持三种来源：
 
-直接解析 PDF 时，系统采用 layout-aware 优先策略：
+- `--parser mineru`：默认路径，自动调用 MinerU 解析 `data/pdfs/` 下的 PDF。
+- `--content-list`：直接接入 MinerU/RAG-Anything 已经导出的 `content_list.json` 或 `content_list_v2.json`。
+- `--parser native`：旧版本地解析器，仅用于 MinerU 不可用时的调试兜底。
+
+MinerU 解析后，系统会读取其结构化输出，并转换为统一证据节点：
+
+```text
+text/title/list      -> text/title 节点
+table/table_body     -> table 节点
+image/chart/figure   -> figure 节点
+image_caption 等     -> caption 节点
+equation/formula     -> equation 节点
+```
+
+MinerU 输出中的 `bbox`、`img_path`、`image_caption`、`table_caption`、`latex`、`html` 等字段会被保留到节点内容或元数据中，后续继续进入 embedding-vision、G4 rerank、证据链和证据卡片流程。
+
+旧版 native 解析器采用 layout-aware 优先策略：
 
 1. `PyMuPDF`：读取页面 text block、image block、字体大小、block bbox 和页面尺寸。
 2. `pdfplumber`：可选抽取结构化表格，保留行列文本和表格 bbox。
 3. `pypdf` / `PyPDF2` / `pdfplumber.extract_text` / `pdftotext`：当 layout 解析不可用时作为文本回退链路。
 
-每一页都会先生成一个 `page` 节点，然后对页面文本进行 chunk。
+无论使用 MinerU 还是 native，每一页都会先生成一个 `page` 节点，然后对页面内容进行 chunk。
 
 Layout-aware 解析会额外产生：
 
@@ -177,7 +192,7 @@ outputs/layout_debug/
 outputs/metrics/layout_bbox_debug.csv
 ```
 
-视觉增强后会补充：
+MinerU/native 解析和视觉增强后会补充：
 
 ```text
 page_image_path, crop_image_path, bbox, bbox_source,
@@ -666,6 +681,16 @@ npm install
 ```powershell
 [Environment]::SetEnvironmentVariable('ARK_API_KEY','你的 Ark API Key','User')
 [Environment]::SetEnvironmentVariable('ARK_BASE_URL','https://ark.cn-beijing.volces.com/api/v3','User')
+[Environment]::SetEnvironmentVariable('RAG_PDF_PARSER','mineru','User')
+[Environment]::SetEnvironmentVariable('RAG_MINERU_OUTPUT_DIR','outputs/mineru','User')
+[Environment]::SetEnvironmentVariable('MINERU_API_URL','','User')
+[Environment]::SetEnvironmentVariable('MINERU_BACKEND','pipeline','User')
+[Environment]::SetEnvironmentVariable('MINERU_METHOD','auto','User')
+[Environment]::SetEnvironmentVariable('MINERU_MODEL_SOURCE','local','User')
+[Environment]::SetEnvironmentVariable('MINERU_TOOLS_CONFIG_JSON','D:\ai_models\mineru\mineru.json','User')
+[Environment]::SetEnvironmentVariable('MINERU_DEVICE_MODE','cuda','User')
+[Environment]::SetEnvironmentVariable('MINERU_API_OUTPUT_ROOT','D:\ai_models\mineru_api_outputs','User')
+[Environment]::SetEnvironmentVariable('MINERU_API_MAX_CONCURRENT_REQUESTS','1','User')
 [Environment]::SetEnvironmentVariable('RAG_EMBEDDING_PROVIDER','ark','User')
 [Environment]::SetEnvironmentVariable('RAG_EMBEDDING_MODEL','doubao-embedding-vision-250615','User')
 [Environment]::SetEnvironmentVariable('ARK_EMBEDDING_DIMENSIONS','1024','User')
@@ -677,6 +702,44 @@ npm install
 
 ```text
 configs/doubao_optimized.env.example
+```
+
+安装 MinerU：
+
+```powershell
+D:\conda_envs\rag-gpu\python.exe -m pip install --upgrade pip
+D:\conda_envs\rag-gpu\python.exe -m pip install uv
+D:\conda_envs\rag-gpu\python.exe -m uv pip install -U "mineru[all]"
+```
+
+安装完成后检查：
+
+```powershell
+D:\conda_envs\rag-gpu\Scripts\mineru.exe --version
+```
+
+如果 `mineru` 命令没有自动进 PATH，可以把路径写入：
+
+```powershell
+[Environment]::SetEnvironmentVariable('MINERU_BIN','D:\conda_envs\rag-gpu\Scripts\mineru.exe','User')
+```
+
+也可以用 MinerU API 服务模式。先启动一个常驻 MinerU API：
+
+```powershell
+D:\conda_envs\rag-gpu\Scripts\mineru-api.exe --host 127.0.0.1 --port 8000
+```
+
+然后让本项目复用这个 API：
+
+```powershell
+[Environment]::SetEnvironmentVariable('MINERU_API_URL','http://127.0.0.1:8000','User')
+```
+
+之后 `scripts/01_parse_pdf.py`、`scripts/06_run_pipeline.py` 和后端上传 PDF 都会通过这个 MinerU API 解析。也可以临时通过命令行指定：
+
+```powershell
+D:\conda_envs\rag-gpu\python.exe scripts\01_parse_pdf.py --parser mineru --mineru-api-url http://127.0.0.1:8000
 ```
 
 启动后端：
@@ -713,6 +776,9 @@ http://127.0.0.1:5174/
 ```bash
 python scripts/06_run_pipeline.py \
   --questions data/questions.csv \
+  --parser mineru \
+  --mineru-backend pipeline \
+  --mineru-method auto \
   --candidate-retriever fusion \
   --rerank-retriever fusion \
   --embedding-model doubao-embedding-vision-250615 \
@@ -738,7 +804,7 @@ python scripts/13_export_frontend_data.py
 ## 当前技术边界
 
 - 当前向量索引是本地 `.npz` 缓存和内存矩阵检索，不是独立向量数据库。
-- PDF 表格结构主要依赖文本抽取和规则推断，复杂表格仍可能需要 RAG-Anything/MinerU 或人工补充节点。
+- PDF 表格结构默认由 MinerU 输出转换而来；特别复杂、跨页或图片化表格仍可能需要人工补充节点或额外校验。
 - 如果配置了 Ark embedding-vision，系统会真实调用图文 embedding API；如果未配置，则回退到本地 embedding 或 lexical/fusion 中的非 API 路线。
 - 默认视觉 caption 仍是可选能力；仅有 embedding-vision 并不等于完整 VLM 图像问答，强视觉理解仍建议配合 `scripts/10_build_visual_evidence.py --caption-provider doubao` 生成结构化 `qa_evidence`。
 - 大 PDF 首次运行会较慢，主要耗时在页面渲染、embedding-vision API 调用、G4 重排序和证据卡片生成。
