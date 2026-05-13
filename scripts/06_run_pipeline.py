@@ -11,6 +11,33 @@ from pipeline_common import ensure_project_dirs
 
 
 ROOT = Path(__file__).resolve().parents[1]
+VISUAL_CAPTION_PROVIDERS = {"local", "qwen", "doubao"}
+
+
+def clean_env(name: str, default: str = "") -> str:
+    try:
+        from ark_clients import get_env
+
+        return get_env(name, default).strip()
+    except Exception:
+        return os.getenv(name, default).strip()
+
+
+def default_visual_caption_provider() -> str:
+    provider = (
+        clean_env("RAG_VISUAL_CAPTION_PROVIDER")
+        or clean_env("RAG_BACKEND_VISUAL_CAPTION_PROVIDER")
+    ).lower()
+    if provider in VISUAL_CAPTION_PROVIDERS:
+        return provider
+    return "qwen" if clean_env("DASHSCOPE_API_KEY") else "local"
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(clean_env(name, str(default)))
+    except ValueError:
+        return default
 
 
 def run_step(args: list[str]) -> None:
@@ -46,28 +73,39 @@ def main() -> None:
     parser.add_argument("--chunk-size", type=int, default=900)
     parser.add_argument("--skip-visual", action="store_true")
     parser.add_argument("--visual-dpi", type=int, default=120)
-    parser.add_argument("--visual-caption-provider", choices=["local", "qwen"], default="local")
+    parser.add_argument(
+        "--visual-caption-provider",
+        choices=sorted(VISUAL_CAPTION_PROVIDERS),
+        default=default_visual_caption_provider(),
+    )
     parser.add_argument("--visual-caption-model", default="")
     parser.add_argument("--visual-caption-device", default="auto")
-    parser.add_argument("--visual-max-captions", type=int, default=0)
-    parser.add_argument("--qwen-model", default="qwen-vl-plus")
-    parser.add_argument("--qwen-base-url", default="https://dashscope.aliyuncs.com/compatible-mode/v1")
-    parser.add_argument("--qwen-api-key-env", default="DASHSCOPE_API_KEY")
+    parser.add_argument(
+        "--visual-max-captions",
+        type=int,
+        default=env_int("RAG_VISUAL_MAX_CAPTIONS", env_int("RAG_BACKEND_VISUAL_MAX_CAPTIONS", 0)),
+    )
+    parser.add_argument("--qwen-model", default=clean_env("RAG_QWEN_VL_MODEL", "qwen-vl-plus"))
+    parser.add_argument("--qwen-base-url", default=clean_env("RAG_QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"))
+    parser.add_argument("--qwen-api-key-env", default=clean_env("RAG_QWEN_API_KEY_ENV", "DASHSCOPE_API_KEY"))
+    parser.add_argument("--ark-vision-model", default=clean_env("RAG_ARK_VISION_MODEL"))
+    parser.add_argument("--ark-base-url", default=clean_env("RAG_ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"))
+    parser.add_argument("--ark-api-key-env", default=clean_env("RAG_ARK_API_KEY_ENV", "ARK_API_KEY"))
     parser.add_argument(
         "--candidate-retriever",
-        choices=["fusion", "hybrid", "embedding", "lexical"],
+        choices=["fusion", "hybrid", "embedding", "lexical", "bm25", "kg"],
         default="fusion",
         help="Retriever used for G0 candidate generation.",
     )
     parser.add_argument(
         "--rerank-retriever",
-        choices=["fusion", "hybrid", "embedding", "lexical"],
+        choices=["fusion", "hybrid", "embedding", "lexical", "bm25", "kg"],
         default="fusion",
         help="Retriever used for G1-G4 similarity scores.",
     )
     parser.add_argument(
         "--retriever",
-        choices=["fusion", "hybrid", "embedding", "lexical"],
+        choices=["fusion", "hybrid", "embedding", "lexical", "bm25", "kg"],
         default="",
         help="Backward-compatible shortcut that sets both candidate and rerank retrievers.",
     )
@@ -76,6 +114,10 @@ def main() -> None:
     parser.add_argument("--embedding-device", default=DEFAULT_EMBEDDING_DEVICE)
     parser.add_argument("--embedding-batch-size", type=int, default=DEFAULT_EMBEDDING_BATCH_SIZE)
     parser.add_argument("--hybrid-alpha", type=float, default=0.7)
+    parser.add_argument("--kg-dir", default="outputs/kg")
+    parser.add_argument("--text-index-dir", default="outputs/text_index")
+    parser.add_argument("--visual-index-dir", default="outputs/visual_index")
+    parser.add_argument("--skip-kg", action="store_true")
     args = parser.parse_args()
     rerank_k = args.rerank_k if args.rerank_k is not None else args.top_k
     candidate_retriever = args.retriever or args.candidate_retriever
@@ -127,26 +169,13 @@ def main() -> None:
                 "--dpi",
                 str(args.visual_dpi),
             ]
-            if args.visual_caption_model:
-                visual_step.extend(
-                    [
-                        "--caption-provider",
-                        args.visual_caption_provider,
-                        "--caption-model",
-                        args.visual_caption_model,
-                        "--caption-device",
-                        args.visual_caption_device,
-                        "--max-captions",
-                        str(args.visual_max_captions),
-                    ]
-                )
-            elif args.visual_caption_provider == "qwen":
+            if args.visual_caption_provider == "qwen":
                 visual_step.extend(
                     [
                         "--caption-provider",
                         "qwen",
                         "--qwen-model",
-                        args.qwen_model,
+                        args.visual_caption_model or args.qwen_model,
                         "--qwen-base-url",
                         args.qwen_base_url,
                         "--qwen-api-key-env",
@@ -155,8 +184,52 @@ def main() -> None:
                         str(args.visual_max_captions),
                     ]
                 )
+            elif args.visual_caption_provider == "doubao":
+                visual_step.extend(
+                    [
+                        "--caption-provider",
+                        "doubao",
+                        "--ark-model",
+                        args.visual_caption_model or args.ark_vision_model,
+                        "--ark-base-url",
+                        args.ark_base_url,
+                        "--ark-api-key-env",
+                        args.ark_api_key_env,
+                        "--max-captions",
+                        str(args.visual_max_captions),
+                    ]
+                )
+            elif args.visual_caption_model:
+                visual_step.extend(
+                    [
+                        "--caption-provider",
+                        "local",
+                        "--caption-model",
+                        args.visual_caption_model,
+                        "--caption-device",
+                        args.visual_caption_device,
+                        "--max-captions",
+                        str(args.visual_max_captions),
+                    ]
+                )
             run_step(visual_step)
         run_step([py, "scripts/02_build_graph.py", "--nodes", nodes, "--output", edges])
+
+    if not args.skip_kg:
+        run_step(
+            [
+                py,
+                "scripts/23_build_datafountain_kg.py",
+                "--nodes",
+                nodes,
+                "--kg-dir",
+                args.kg_dir,
+                "--text-dir",
+                args.text_index_dir,
+                "--visual-dir",
+                args.visual_index_dir,
+            ]
+        )
 
     run_step(
         [
@@ -180,6 +253,8 @@ def main() -> None:
             str(args.embedding_batch_size),
             "--hybrid-alpha",
             str(args.hybrid_alpha),
+            "--kg-dir",
+            args.kg_dir,
         ]
     )
     run_step(
@@ -206,6 +281,8 @@ def main() -> None:
             str(args.embedding_batch_size),
             "--hybrid-alpha",
             str(args.hybrid_alpha),
+            "--kg-dir",
+            args.kg_dir,
         ]
     )
     run_step([py, "scripts/05_evaluate.py", "--questions", questions])

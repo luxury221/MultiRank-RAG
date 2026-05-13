@@ -30,6 +30,41 @@ VISUAL_SECTION_RE = re.compile(r"\n*\s*Visual summary:\s*.*$", re.S)
 QWEN_DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 QWEN_DEFAULT_MODEL = "qwen-vl-plus"
 ARK_DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+CAPTION_PROVIDERS = {"local", "qwen", "doubao"}
+
+
+def env_value(name: str, default: str = "") -> str:
+    try:
+        from ark_clients import get_env
+
+        return get_env(name, default)
+    except Exception:
+        return os.getenv(name, default)
+
+
+def default_caption_provider() -> str:
+    provider = clean_text(
+        env_value("RAG_VISUAL_CAPTION_PROVIDER")
+        or env_value("RAG_BACKEND_VISUAL_CAPTION_PROVIDER")
+        or ""
+    ).lower()
+    if provider in CAPTION_PROVIDERS:
+        return provider
+    return "qwen" if env_value("DASHSCOPE_API_KEY") else "local"
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(env_value(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    try:
+        return float(env_value(name, str(default)))
+    except (TypeError, ValueError):
+        return default
 
 
 def rel_path(path: Path) -> str:
@@ -307,7 +342,7 @@ class QwenVisionCaptioner:
         self.api_key_env = api_key_env or "DASHSCOPE_API_KEY"
         self.timeout = timeout
         self.client = None
-        api_key = os.getenv(self.api_key_env)
+        api_key = env_value(self.api_key_env)
         if not api_key:
             return
         from openai import OpenAI
@@ -368,12 +403,12 @@ class ArkVisionCaptioner:
         api_key_env: str = "ARK_API_KEY",
         timeout: float = 60.0,
     ) -> None:
-        self.model_name = model_name or os.getenv("ARK_MODEL", "")
+        self.model_name = model_name or env_value("ARK_MODEL", "")
         self.base_url = base_url or ARK_DEFAULT_BASE_URL
         self.api_key_env = api_key_env or "ARK_API_KEY"
         self.timeout = timeout
         self.client = None
-        api_key = os.getenv(self.api_key_env)
+        api_key = env_value(self.api_key_env)
         if not api_key or not self.model_name:
             return
         from openai import OpenAI
@@ -626,21 +661,26 @@ def main() -> None:
     parser.add_argument("--output", default=str(DEFAULT_NODES.relative_to(DEFAULT_NODES.parents[2])))
     parser.add_argument("--visual-dir", default="outputs/visual")
     parser.add_argument("--dpi", type=int, default=120)
-    parser.add_argument("--caption-provider", choices=["local", "qwen", "doubao"], default="local")
+    parser.add_argument("--caption-provider", choices=sorted(CAPTION_PROVIDERS), default=default_caption_provider())
     parser.add_argument("--caption-model", default="", help="Optional BLIP model, e.g. Salesforce/blip-image-captioning-base.")
     parser.add_argument("--caption-device", default="auto")
-    parser.add_argument("--max-captions", type=int, default=0, help="0 means no limit when --caption-model is set.")
+    parser.add_argument(
+        "--max-captions",
+        type=int,
+        default=env_int("RAG_VISUAL_MAX_CAPTIONS", env_int("RAG_BACKEND_VISUAL_MAX_CAPTIONS", 0)),
+        help="0 means no limit when a visual caption provider is enabled.",
+    )
     parser.add_argument("--caption-node-ids", default="", help="Optional comma/semicolon separated node ids to caption.")
     parser.add_argument("--caption-field-prefix", default="", help="Write caption fields with this prefix, e.g. doubao.")
     parser.add_argument("--skip-existing-captions", action="store_true")
-    parser.add_argument("--qwen-model", default=QWEN_DEFAULT_MODEL)
-    parser.add_argument("--qwen-base-url", default=QWEN_DEFAULT_BASE_URL)
-    parser.add_argument("--qwen-api-key-env", default="DASHSCOPE_API_KEY")
-    parser.add_argument("--qwen-timeout", type=float, default=60.0)
-    parser.add_argument("--ark-model", default="")
-    parser.add_argument("--ark-base-url", default=ARK_DEFAULT_BASE_URL)
-    parser.add_argument("--ark-api-key-env", default="ARK_API_KEY")
-    parser.add_argument("--ark-timeout", type=float, default=60.0)
+    parser.add_argument("--qwen-model", default=env_value("RAG_QWEN_VL_MODEL", QWEN_DEFAULT_MODEL))
+    parser.add_argument("--qwen-base-url", default=env_value("RAG_QWEN_BASE_URL", QWEN_DEFAULT_BASE_URL))
+    parser.add_argument("--qwen-api-key-env", default=env_value("RAG_QWEN_API_KEY_ENV", "DASHSCOPE_API_KEY"))
+    parser.add_argument("--qwen-timeout", type=float, default=env_float("RAG_QWEN_TIMEOUT", 60.0))
+    parser.add_argument("--ark-model", default=env_value("RAG_ARK_VISION_MODEL", ""))
+    parser.add_argument("--ark-base-url", default=env_value("RAG_ARK_BASE_URL", ARK_DEFAULT_BASE_URL))
+    parser.add_argument("--ark-api-key-env", default=env_value("RAG_ARK_API_KEY_ENV", "ARK_API_KEY"))
+    parser.add_argument("--ark-timeout", type=float, default=env_float("RAG_ARK_TIMEOUT", 60.0))
     args = parser.parse_args()
 
     ensure_project_dirs()

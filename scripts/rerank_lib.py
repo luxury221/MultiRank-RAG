@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import math
 import re
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
+from pathlib import Path
 from typing import Any
 
 import networkx as nx
@@ -17,7 +19,7 @@ from embedding_index import (
     EmbeddingIndex,
     node_embedding_text,
 )
-from pipeline_common import as_float, clean_text, preview, split_multi
+from pipeline_common import as_float, clean_text, preview, read_jsonl, resolve_path, split_multi
 
 
 TYPE_WEIGHTS = {
@@ -31,7 +33,42 @@ TYPE_WEIGHTS = {
 }
 
 DEFAULT_MODALITIES = ["text", "table", "figure", "page", "caption"]
-RETRIEVER_CHOICES = ["fusion", "hybrid", "embedding", "lexical"]
+RETRIEVER_CHOICES = ["fusion", "hybrid", "embedding", "lexical", "bm25", "kg"]
+DEFAULT_KG_DIR = os.getenv("RAG_KG_DIR", "outputs/kg")
+
+_CORPUS_FEATURE_CACHE: dict[tuple[str, ...], dict[str, Any]] = {}
+_GRAPH_BUILD_CACHE: dict[tuple[int, int, int, int], nx.Graph] = {}
+_NODES_BY_ID_CACHE: dict[tuple[str, ...], dict[str, dict[str, Any]]] = {}
+_NODE_REFS_CACHE: dict[int, dict[str, set[tuple[str, str]]]] = {}
+
+KG_CONCRETE_TYPES = {"product", "part", "fault", "image"}
+KG_SUPPORT_TYPES = {"action", "policy"}
+KG_POLICY_INTENT_NAMES = {
+    "return_refund": "\u9000\u6362\u8d27\u9000\u6b3e",
+    "invoice": "\u53d1\u7968\u5f00\u7968",
+    "shipping_damage": "\u7269\u6d41\u5305\u88c5\u7834\u635f",
+    "warranty_repair": "\u4fdd\u4fee\u7ef4\u4fee",
+    "troubleshooting": "\u6545\u969c\u6392\u67e5",
+    "usage_operation": "\u5b89\u88c5\u4f7f\u7528",
+    "spec_parts": "\u89c4\u683c\u914d\u4ef6",
+    "safety": "\u5b89\u5168\u8b66\u544a",
+}
+KG_GENERIC_POLICY_TERMS = {
+    "\u552e\u540e",
+    "\u5ba2\u670d",
+    "\u5546\u54c1",
+    "\u670d\u52a1",
+    "\u652f\u6301",
+    "\u8303\u56f4",
+    "\u5982\u4f55",
+    "\u600e\u4e48",
+    "\u9700\u8981",
+    "after-sales",
+    "customer service",
+    "service",
+    "support",
+}
+KG_GENERIC_ACTION_TERMS = {"use", "operate", "\u4f7f\u7528", "\u64cd\u4f5c"}
 
 BASE_EDGE_TYPE_WEIGHTS = {
     "same_page": 0.05,
@@ -58,6 +95,7 @@ VISUAL_TEXT_FIELDS = (
     "visual_title",
     "visual_type",
     "key_objects",
+    "ocr_text",
     "data_or_trends",
     "qa_evidence",
     "limitations",
@@ -146,6 +184,42 @@ AFTER_SALES_MANUAL_HINTS = (
     "manual_qa",
 )
 
+DATAFOUNTAIN_PRODUCT_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("空调", ("空调", "air conditioner", "air conditioning", " ac ")),
+    ("电钻", ("电钻", "drill", "electric drill")),
+    ("空气净化器", ("空气净化器", "air purifier")),
+    ("吹风机", ("吹风机", "hair dryer", "blow dryer")),
+    ("洗碗机", ("洗碗机", "dishwasher", "dish washer")),
+    ("健身单车", ("健身单车", "exercise bike", "fitness bike", "stationary bike")),
+    ("蒸汽清洁机", ("蒸汽清洁机", "steam cleaner", "steam mop")),
+    ("儿童电动摩托车", ("儿童电动摩托车", "kids electric motorcycle", "electric motorcycle", "toy motorcycle")),
+    ("冰箱", ("冰箱", "refrigerator", "fridge")),
+    ("摩托艇", ("摩托艇", "jetski", "jet ski", "watercraft")),
+    ("人体工学椅", ("人体工学椅", "ergonomic chair", "office chair")),
+    ("功能键盘", ("功能键盘", "function keyboard", "keyboard")),
+    ("烤箱", ("烤箱", "oven")),
+    ("相机", ("相机", "camera")),
+    ("可编程温控器", ("可编程温控器", "programmable thermostat", "thermostat")),
+    ("健身追踪器", ("健身追踪器", "fitness tracker", "activity tracker")),
+    ("水泵", ("水泵", "water pump", "pump")),
+    ("发电机", ("发电机", "generator")),
+    ("VR头显", ("VR头显", "vr headset", "virtual reality headset")),
+    ("蓝牙激光鼠标", ("蓝牙激光鼠标", "bluetooth laser mouse", "laser mouse", "mouse")),
+    ("耳机", ("earphones", "earbuds", "headphones", "耳机")),
+    ("电子书阅读器", ("ereader", "e-reader", "ebook reader", "电子书", "阅读器")),
+    ("传真机", ("fax", "fax machine", "传真")),
+    ("烤架", ("grill", "barbecue", "bbq")),
+    ("座机", ("landline", "handset", "base station", "telephone")),
+    ("割草机", ("lawn mower", "mower")),
+    ("微波炉", ("over-the-range microwave", "microwave")),
+    ("主板", ("motherboard", "bios", "sata", "pci express", "cpu")),
+    ("压力锅空气炸锅", ("multi-use pressure cooker", "pressure cooker", "air fryer")),
+    ("扫地机/吸尘器", ("vacuum cleaner", "vacuum", "home base")),
+    ("雪地摩托", ("snowmobile",)),
+    ("电视/收音", ("television", "tv", "radio", "dvd player", "outdoor antenna")),
+    ("电动牙刷", ("electric toothbrush", "toothbrush")),
+)
+
 SECTION_QUERY_HINTS = {
     "method": ("method", "methods", "methodology", "approach", "\u65b9\u6cd5"),
     "experiment": ("experiment", "experiments", "evaluation", "results", "\u5b9e\u9a8c", "\u7ed3\u679c", "\u8bc4\u4f30"),
@@ -175,6 +249,300 @@ def lexical_similarity(query: str, texts: list[str]) -> list[float]:
         return [float(max(0.0, score)) for score in sims]
     except Exception:
         return [_char_jaccard(query, text) for text in texts]
+
+
+def _corpus_key(nodes: list[dict[str, Any]]) -> tuple[str, ...]:
+    return tuple(clean_text(node.get("node_id")) for node in nodes)
+
+
+def _corpus_feature(nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    key = _corpus_key(nodes)
+    feature = _CORPUS_FEATURE_CACHE.get(key)
+    if feature is None:
+        feature = {
+            "node_ids": list(key),
+            "texts": {},
+            "lexical": {},
+            "bm25": {},
+            "node_refs": None,
+            "scorable_nodes": None,
+        }
+        _CORPUS_FEATURE_CACHE[key] = feature
+    return feature
+
+
+def _scorable_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    feature = _corpus_feature(nodes)
+    cached = feature.get("scorable_nodes")
+    if cached is None:
+        cached = [node for node in nodes if clean_text(node.get("node_id")) and node_embedding_text(node)]
+        feature["scorable_nodes"] = cached
+    return cached
+
+
+def _cached_texts_for_nodes(nodes: list[dict[str, Any]], text_key: str) -> list[str]:
+    feature = _corpus_feature(nodes)
+    texts_by_key = feature["texts"]
+    texts = texts_by_key.get(text_key)
+    if texts is not None:
+        return texts
+    if text_key == "retrieval":
+        texts = [node_retrieval_text(node) for node in nodes]
+    elif text_key == "section":
+        texts = [section_route_text(node) for node in nodes]
+    elif text_key == "visual":
+        texts = [
+            clean_text(
+                " ".join(
+                    [
+                        node.get("node_type", ""),
+                        node.get("layout_role", ""),
+                        node.get("bbox_source", ""),
+                        visual_text_for_node(node),
+                        preview(node.get("content", ""), 220),
+                    ]
+                )
+            )
+            for node in nodes
+        ]
+    elif text_key == "product":
+        texts = [product_route_text(node) for node in nodes]
+    else:
+        raise ValueError(f"Unknown cached text key: {text_key}")
+    texts_by_key[text_key] = texts
+    return texts
+
+
+def _build_lexical_corpus(texts: list[str]) -> dict[str, Any]:
+    clean_texts = [clean_text(text) for text in texts]
+    if not clean_texts:
+        return {"texts": clean_texts, "vectorizer": None, "matrix": None}
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+
+        vectorizer = TfidfVectorizer(analyzer="char", ngram_range=(2, 4), min_df=1)
+        matrix = vectorizer.fit_transform(clean_texts)
+        return {"texts": clean_texts, "vectorizer": vectorizer, "matrix": matrix}
+    except Exception:
+        return {"texts": clean_texts, "vectorizer": None, "matrix": None}
+
+
+def _lexical_values_from_corpus(query: str, corpus: dict[str, Any]) -> list[float]:
+    query = clean_text(query)
+    texts = corpus.get("texts") or []
+    if not texts:
+        return []
+    if not query:
+        return [0.0 for _ in texts]
+    vectorizer = corpus.get("vectorizer")
+    matrix = corpus.get("matrix")
+    if vectorizer is not None and matrix is not None:
+        try:
+            from sklearn.metrics.pairwise import cosine_similarity
+
+            query_matrix = vectorizer.transform([query])
+            sims = cosine_similarity(query_matrix, matrix).ravel()
+            return [float(max(0.0, score)) for score in sims]
+        except Exception:
+            pass
+    return [_char_jaccard(query, text) for text in texts]
+
+
+def _lexical_corpus_for_nodes(nodes: list[dict[str, Any]], text_key: str) -> dict[str, Any]:
+    feature = _corpus_feature(nodes)
+    corpus_by_key = feature["lexical"]
+    corpus = corpus_by_key.get(text_key)
+    if corpus is None:
+        corpus = _build_lexical_corpus(_cached_texts_for_nodes(nodes, text_key))
+        corpus_by_key[text_key] = corpus
+    return corpus
+
+
+def _scores_from_cached_texts(query: str, nodes: list[dict[str, Any]], text_key: str) -> dict[str, float]:
+    feature = _corpus_feature(nodes)
+    values = _lexical_values_from_corpus(query, _lexical_corpus_for_nodes(nodes, text_key))
+    return {
+        node_id: score
+        for node_id, score in zip(feature["node_ids"], values)
+        if node_id
+    }
+
+
+def bm25_tokenize(text: Any) -> list[str]:
+    text = clean_text(text).casefold()
+    if not text:
+        return []
+    tokens: list[str] = []
+    for match in re.finditer(r"[a-z0-9][a-z0-9_+\-./]{1,}|[\u4e00-\u9fff]+", text):
+        token = match.group(0).strip("._-/")
+        if not token:
+            continue
+        if any("\u4e00" <= ch <= "\u9fff" for ch in token):
+            chars = [ch for ch in token if "\u4e00" <= ch <= "\u9fff"]
+            if len(chars) <= 4:
+                tokens.append("".join(chars))
+            tokens.extend(chars)
+            tokens.extend("".join(chars[i : i + 2]) for i in range(max(0, len(chars) - 1)))
+            tokens.extend("".join(chars[i : i + 3]) for i in range(max(0, len(chars) - 2)))
+        else:
+            tokens.append(token)
+            if token.endswith("s") and len(token) > 4:
+                tokens.append(token[:-1])
+    return tokens
+
+
+def _build_bm25_corpus(texts: list[str]) -> dict[str, Any]:
+    doc_tokens = [bm25_tokenize(text) for text in texts]
+    doc_lengths = [len(tokens) for tokens in doc_tokens]
+    doc_freq: Counter[str] = Counter()
+    term_freqs: list[Counter[str]] = []
+    for tokens in doc_tokens:
+        term_freq = Counter(tokens)
+        term_freqs.append(term_freq)
+        doc_freq.update(term_freq.keys())
+    avg_doc_length = sum(doc_lengths) / len(doc_lengths) if doc_lengths else 0.0
+    return {
+        "doc_tokens": doc_tokens,
+        "doc_lengths": doc_lengths,
+        "term_freqs": term_freqs,
+        "doc_freq": doc_freq,
+        "avg_doc_length": avg_doc_length,
+        "total_docs": len(doc_tokens),
+    }
+
+
+def _bm25_values_from_corpus(
+    query: str,
+    corpus: dict[str, Any],
+    k1: float = 1.5,
+    b: float = 0.75,
+) -> list[float]:
+    doc_tokens = corpus.get("doc_tokens") or []
+    query_terms = bm25_tokenize(query)
+    if not doc_tokens:
+        return []
+    if not query_terms:
+        return [0.0 for _ in doc_tokens]
+
+    doc_lengths = corpus.get("doc_lengths") or []
+    avg_doc_length = float(corpus.get("avg_doc_length") or 0.0)
+    if avg_doc_length <= 0:
+        return [0.0 for _ in doc_tokens]
+
+    doc_freq: Counter[str] = corpus.get("doc_freq") or Counter()
+    term_freqs = corpus.get("term_freqs") or [Counter(tokens) for tokens in doc_tokens]
+    query_counts = Counter(query_terms)
+    total_docs = int(corpus.get("total_docs") or len(doc_tokens))
+    scores: list[float] = []
+    for term_freq, doc_length in zip(term_freqs, doc_lengths):
+        score = 0.0
+        length_norm = k1 * (1.0 - b + b * doc_length / avg_doc_length)
+        for term, query_count in query_counts.items():
+            freq = term_freq.get(term, 0)
+            if not freq:
+                continue
+            df = doc_freq.get(term, 0)
+            idf = math.log(1.0 + (total_docs - df + 0.5) / (df + 0.5))
+            score += query_count * idf * (freq * (k1 + 1.0)) / (freq + length_norm)
+        scores.append(float(max(0.0, score)))
+    return scores
+
+
+def _bm25_corpus_for_nodes(nodes: list[dict[str, Any]], text_key: str) -> dict[str, Any]:
+    feature = _corpus_feature(nodes)
+    corpus_by_key = feature["bm25"]
+    corpus = corpus_by_key.get(text_key)
+    if corpus is None:
+        corpus = _build_bm25_corpus(_cached_texts_for_nodes(nodes, text_key))
+        corpus_by_key[text_key] = corpus
+    return corpus
+
+
+def _bm25_scores_from_cached_texts(query: str, nodes: list[dict[str, Any]], text_key: str) -> dict[str, float]:
+    feature = _corpus_feature(nodes)
+    values = _bm25_values_from_corpus(query, _bm25_corpus_for_nodes(nodes, text_key))
+    return {
+        node_id: score
+        for node_id, score in zip(feature["node_ids"], values)
+        if node_id
+    }
+
+
+def bm25_similarity(query: str, texts: list[str], k1: float = 1.5, b: float = 0.75) -> list[float]:
+    if not texts:
+        return []
+    return _bm25_values_from_corpus(query, _build_bm25_corpus(texts), k1=k1, b=b)
+
+
+def _bm25_scores_from_texts(query: str, nodes: list[dict[str, Any]], texts: list[str]) -> dict[str, float]:
+    values = bm25_similarity(query, texts)
+    return {
+        clean_text(node.get("node_id")): score
+        for node, score in zip(nodes, values)
+        if clean_text(node.get("node_id"))
+    }
+
+
+def _safe_json_text(value: Any) -> str:
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(clean_text(item) for item in value if clean_text(item))
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return clean_text(value)
+
+
+def load_kg_index(kg_dir: str | Path = DEFAULT_KG_DIR) -> dict[str, Any]:
+    if not clean_text(kg_dir):
+        return {}
+    root = resolve_path(kg_dir)
+    entity_path = root / "entities.jsonl"
+    relation_path = root / "relations.jsonl"
+    profile_path = root / "product_profiles.jsonl"
+    if not entity_path.exists() or not relation_path.exists():
+        return {}
+
+    entities = read_jsonl(entity_path)
+    relations = read_jsonl(relation_path)
+    profiles = read_jsonl(profile_path) if profile_path.exists() else []
+    entity_by_id = {clean_text(row.get("entity_id")): row for row in entities if clean_text(row.get("entity_id"))}
+    node_entities: dict[str, set[str]] = defaultdict(set)
+    entity_terms: list[tuple[str, str, tuple[str, ...], str]] = []
+    for row in entities:
+        entity_id = clean_text(row.get("entity_id"))
+        if not entity_id:
+            continue
+        name = clean_text(row.get("name"))
+        aliases = tuple(alias for alias in split_multi(_safe_json_text(row.get("aliases"))) if alias)
+        if isinstance(row.get("aliases"), list):
+            aliases = tuple(clean_text(alias) for alias in row.get("aliases", []) if clean_text(alias))
+        entity_terms.append((entity_id, name, aliases, clean_text(row.get("entity_type"))))
+        node_ids = row.get("node_ids") if isinstance(row.get("node_ids"), list) else split_multi(row.get("node_ids"))
+        for node_id in node_ids:
+            if clean_text(node_id):
+                node_entities[clean_text(node_id)].add(entity_id)
+
+    node_relations: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in relations:
+        node_id = clean_text(row.get("evidence_node_id"))
+        if node_id:
+            node_relations[node_id].append(row)
+
+    product_profile_by_id = {
+        clean_text(row.get("product_id")): row for row in profiles if clean_text(row.get("product_id"))
+    }
+    return {
+        "root": str(root),
+        "entities": entity_by_id,
+        "entity_terms": entity_terms,
+        "relations": relations,
+        "node_entities": node_entities,
+        "node_relations": node_relations,
+        "product_profiles": product_profile_by_id,
+    }
+
+
+def kg_available(kg_index: dict[str, Any] | None) -> bool:
+    return bool(kg_index and kg_index.get("entities"))
 
 
 def _scores_from_texts(query: str, nodes: list[dict[str, Any]], texts: list[str]) -> dict[str, float]:
@@ -228,7 +596,7 @@ def section_structure_scores(question: dict[str, Any], nodes: list[dict[str, Any
         if any(term.casefold() in blob for term in terms):
             expanded_terms.extend(terms)
     expanded_query = " ".join(dict.fromkeys(term for term in expanded_terms if term))
-    raw_scores = _scores_from_texts(expanded_query, nodes, [section_route_text(node) for node in nodes])
+    raw_scores = _scores_from_cached_texts(expanded_query, nodes, "section")
     scores: dict[str, float] = {}
     for node in nodes:
         node_id = clean_text(node.get("node_id"))
@@ -251,13 +619,13 @@ def section_structure_scores(question: dict[str, Any], nodes: list[dict[str, Any
 
 def reference_route_scores(question: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[str, float]:
     question_refs = extract_document_refs(question.get("question", ""))
+    node_refs_by_id = _node_refs_for_nodes(nodes)
     scores: dict[str, float] = {}
     for node in nodes:
         node_id = clean_text(node.get("node_id"))
         if not node_id:
             continue
-        content = f"{node.get('content', '')} {node.get('source_ref', '')} {node.get('explicit_refs', '')}"
-        node_refs = extract_document_refs(content)
+        node_refs = node_refs_by_id.get(node_id, set())
         hits = node_refs & question_refs if question_refs else set()
         node_type = clean_text(node.get("node_type")) or "text"
         score = 0.0
@@ -273,21 +641,7 @@ def visual_route_scores(question: dict[str, Any], nodes: list[dict[str, Any]]) -
     intent = question_intent(question)
     if not intent["visual"]:
         return {clean_text(node.get("node_id")): 0.0 for node in nodes if clean_text(node.get("node_id"))}
-    visual_texts = [
-        clean_text(
-            " ".join(
-                [
-                    node.get("node_type", ""),
-                    node.get("layout_role", ""),
-                    node.get("bbox_source", ""),
-                    visual_text_for_node(node),
-                    preview(node.get("content", ""), 220),
-                ]
-            )
-        )
-        for node in nodes
-    ]
-    raw_scores = _scores_from_texts(question.get("question", ""), nodes, visual_texts)
+    raw_scores = _scores_from_cached_texts(question.get("question", ""), nodes, "visual")
     scores: dict[str, float] = {}
     for node in nodes:
         node_id = clean_text(node.get("node_id"))
@@ -331,28 +685,146 @@ def layout_route_scores(question: dict[str, Any], nodes: list[dict[str, Any]]) -
     return scores
 
 
-def route_weights_for_question(question: dict[str, Any], available_routes: dict[str, dict[str, float]]) -> dict[str, float]:
+def question_route_profile(question: dict[str, Any]) -> dict[str, Any]:
     intent = question_intent(question)
-    weights = {
-        "lexical": 1.0,
-        "embedding": 1.15,
-        "section": 0.75,
-        "reference": 0.95 if extract_document_refs(question.get("question", "")) else 0.35,
-        "visual": 0.35,
-        "layout": 0.2,
+    sales = after_sales_intents(question)
+    products = matched_product_groups(question)
+    primary = "general"
+    if sales:
+        strongest = max(sales.items(), key=lambda item: item[1])[0]
+        if strongest in {"return_refund", "invoice", "shipping_damage", "warranty_repair"} and not products:
+            primary = "policy"
+        elif strongest in {"troubleshooting"}:
+            primary = "troubleshooting"
+        elif strongest in {"usage_operation", "spec_parts", "safety"}:
+            primary = "manual_visual" if intent["visual"] else "manual"
+        else:
+            primary = "after_sales"
+    elif intent["table"] or intent["figure"] or intent["cross"] or intent["location"]:
+        primary = "visual"
+    elif intent["text_fact"]:
+        primary = "text_fact"
+    return {
+        "primary": primary,
+        "after_sales": bool(sales),
+        "sales_intents": sales,
+        "has_product": bool(products),
+        **intent,
     }
+
+
+def kg_fusion_route_weight(question: dict[str, Any], kg_index: dict[str, Any] | None) -> float:
+    context = kg_query_context(question, kg_index)
+    if not context["entities"]:
+        return 0.0
+    if context["policies"] and not context["concrete"] and not context["actions"]:
+        return 0.42
+    if context["concrete"] and (context["actions"] or context["policies"]):
+        return 0.72
+    if context["concrete"]:
+        return 0.45
+    return 0.0
+
+
+def route_weights_for_question(
+    question: dict[str, Any],
+    available_routes: dict[str, dict[str, float]],
+    kg_index: dict[str, Any] | None = None,
+) -> dict[str, float]:
+    intent = question_intent(question)
+    profile = question_route_profile(question)
+    weights = {
+        "lexical": 1.12,
+        "bm25": 1.28,
+        "embedding": 0.9,
+        "product": 0.8 if matched_product_groups(question) else 0.0,
+        "kg": min(0.22, kg_fusion_route_weight(question, kg_index)),
+        "section": 0.55,
+        "reference": 0.95 if extract_document_refs(question.get("question", "")) else 0.35,
+        "visual": 0.18,
+        "layout": 0.08,
+    }
+    primary = profile["primary"]
+    if primary == "policy":
+        weights["lexical"] = 1.05
+        weights["bm25"] = 1.25
+        weights["embedding"] = 0.85
+        weights["product"] = 0.0
+        weights["section"] = 0.9
+        weights["visual"] = 0.08
+        weights["layout"] = 0.05
+    elif primary in {"manual", "troubleshooting"}:
+        weights["lexical"] = 1.16
+        weights["bm25"] = 1.34
+        weights["embedding"] = 0.88
+        weights["product"] = max(weights["product"], 0.55 if profile["has_product"] else 0.18)
+        weights["section"] = 0.62
+        weights["visual"] = max(weights["visual"], 0.28)
+    elif primary == "manual_visual":
+        weights["lexical"] = 1.08
+        weights["bm25"] = 1.22
+        weights["embedding"] = 0.86
+        weights["visual"] = 0.55
+        weights["layout"] = 0.22
+        weights["reference"] = max(weights["reference"], 0.65)
+        weights["section"] = 0.62
+    elif primary == "visual":
+        weights["visual"] = 0.7
+        weights["layout"] = max(weights["layout"], 0.28)
+        weights["reference"] = max(weights["reference"], 0.9)
+    elif primary == "text_fact":
+        weights["visual"] *= 0.25
+        weights["layout"] *= 0.3
+        weights["bm25"] = max(weights["bm25"], 1.18)
     if intent["table"] or intent["figure"]:
-        weights["visual"] = 1.0
+        weights["visual"] = max(weights["visual"], 0.62)
         weights["reference"] = max(weights["reference"], 0.8)
     if intent["cross"]:
-        weights["visual"] = max(weights["visual"], 0.85)
-        weights["section"] = max(weights["section"], 0.85)
+        weights["visual"] = max(weights["visual"], 0.55)
+        weights["section"] = max(weights["section"], 0.62)
     if intent["location"]:
-        weights["layout"] = 0.9
+        weights["layout"] = 0.4
     if intent["text_fact"]:
         weights["visual"] *= 0.35
         weights["layout"] *= 0.4
     return {route: weights.get(route, 0.5) for route in available_routes}
+
+
+def node_answer_prior(question: dict[str, Any], node: dict[str, Any]) -> float:
+    intent = question_intent(question)
+    node_id = clean_text(node.get("node_id"))
+    node_type = clean_text(node.get("node_type")) or "text"
+    structure_type = clean_text(node.get("structure_type"))
+    prior = 1.0
+    if node_id.startswith("AS_PROFILE_") or structure_type == "manual_profile":
+        prior *= 0.48
+    if node_type == "title":
+        prior *= 0.72
+    elif node_type == "page":
+        prior *= 0.42
+    elif node_type == "text":
+        prior *= 1.08
+    elif node_type in VISUAL_NODE_TYPES:
+        if intent["table"] or intent["figure"] or intent["location"] or intent["cross"]:
+            prior *= 1.02 if node_has_visual_caption(node) else 0.92
+        else:
+            prior *= 0.72
+    if is_after_sales_question(question) and node_type in VISUAL_NODE_TYPES:
+        prior *= 0.55
+    return prior
+
+
+def apply_node_answer_priors(
+    question: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    scores: dict[str, float],
+) -> dict[str, float]:
+    adjusted: dict[str, float] = {}
+    for node in nodes:
+        node_id = clean_text(node.get("node_id"))
+        if node_id:
+            adjusted[node_id] = scores.get(node_id, 0.0) * node_answer_prior(question, node)
+    return normalize_scores(adjusted, list(adjusted))
 
 
 def rrf_fuse_scores(
@@ -384,13 +856,17 @@ def fusion_scores(
     embedding_cache: str = str(DEFAULT_EMBEDDING_CACHE_DIR),
     embedding_device: str = DEFAULT_EMBEDDING_DEVICE,
     embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
+    kg_index: dict[str, Any] | None = None,
 ) -> dict[str, float]:
-    nodes = [node for node in nodes if clean_text(node.get("node_id")) and node_embedding_text(node)]
-    node_ids = [clean_text(node.get("node_id")) for node in nodes]
+    nodes = _scorable_nodes(nodes)
+    node_ids = list(_corpus_feature(nodes)["node_ids"])
     if not nodes:
         return {}
     route_scores: dict[str, dict[str, float]] = {
-        "lexical": _scores_from_texts(question.get("question", ""), nodes, [node.get("content", "") for node in nodes]),
+        "lexical": _scores_from_cached_texts(question.get("question", ""), nodes, "retrieval"),
+        "bm25": _bm25_scores_from_cached_texts(question.get("question", ""), nodes, "retrieval"),
+        "product": product_route_scores(question, nodes),
+        "kg": kg_route_scores(question, nodes, kg_index),
         "section": section_structure_scores(question, nodes),
         "reference": reference_route_scores(question, nodes),
         "visual": visual_route_scores(question, nodes),
@@ -414,7 +890,8 @@ def fusion_scores(
     }
     if not route_scores:
         return {node_id: 0.0 for node_id in node_ids}
-    return rrf_fuse_scores(route_scores, node_ids, route_weights_for_question(question, route_scores))
+    fused = rrf_fuse_scores(route_scores, node_ids, route_weights_for_question(question, route_scores, kg_index))
+    return apply_node_answer_priors(question, nodes, fused)
 
 
 def similarity_scores(
@@ -427,8 +904,9 @@ def similarity_scores(
     embedding_device: str = DEFAULT_EMBEDDING_DEVICE,
     embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
     hybrid_alpha: float = 0.7,
+    kg_index: dict[str, Any] | None = None,
 ) -> dict[str, float]:
-    nodes = [node for node in nodes if clean_text(node.get("node_id")) and node_embedding_text(node)]
+    nodes = _scorable_nodes(nodes)
     if not nodes:
         return {}
 
@@ -442,7 +920,12 @@ def similarity_scores(
             embedding_cache=embedding_cache,
             embedding_device=embedding_device,
             embedding_batch_size=embedding_batch_size,
+            kg_index=kg_index,
         )
+    if retriever == "bm25":
+        return _bm25_scores_from_cached_texts(question.get("question", ""), nodes, "retrieval")
+    if retriever == "kg":
+        return kg_route_scores(question, nodes, kg_index)
     if retriever in {"embedding", "hybrid"}:
         index = embedding_index or EmbeddingIndex.from_nodes(
             nodes,
@@ -454,9 +937,8 @@ def similarity_scores(
         embedding_scores = index.score(question.get("question", ""), nodes)
         if retriever == "embedding":
             return embedding_scores
-        lexical_values = lexical_similarity(question.get("question", ""), [node.get("content", "") for node in nodes])
-        lexical_scores = {node["node_id"]: score for node, score in zip(nodes, lexical_values)}
-        node_ids = [node["node_id"] for node in nodes]
+        lexical_scores = _scores_from_cached_texts(question.get("question", ""), nodes, "retrieval")
+        node_ids = list(_corpus_feature(nodes)["node_ids"])
         embedding_norm = normalize_scores(embedding_scores, node_ids)
         lexical_norm = normalize_scores(lexical_scores, node_ids)
         alpha = min(1.0, max(0.0, hybrid_alpha))
@@ -467,9 +949,7 @@ def similarity_scores(
     if retriever != "lexical":
         raise ValueError(f"Unknown retriever: {retriever}. Expected one of {', '.join(RETRIEVER_CHOICES)}.")
 
-    texts = [node.get("content", "") for node in nodes]
-    scores = lexical_similarity(question.get("question", ""), texts)
-    return {node["node_id"]: score for node, score in zip(nodes, scores)}
+    return _scores_from_cached_texts(question.get("question", ""), nodes, "retrieval")
 
 
 def _char_jaccard(a: str, b: str) -> float:
@@ -495,6 +975,10 @@ def normalize_scores(scores: dict[str, float], keys: list[str] | None = None) ->
 
 
 def build_graph(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> nx.Graph:
+    cache_key = (id(nodes), id(edges), len(nodes), len(edges))
+    cached = _GRAPH_BUILD_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     graph = nx.Graph()
     for node in nodes:
         node_id = node.get("node_id")
@@ -514,7 +998,17 @@ def build_graph(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> nx.
             graph[source][target]["edge_types"] = sorted(edge_types)
         else:
             graph.add_edge(source, target, weight=weight, edge_type=edge_type, edge_types=[edge_type])
+    _GRAPH_BUILD_CACHE[cache_key] = graph
     return graph
+
+
+def nodes_by_id_cached(nodes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    key = _corpus_key(nodes)
+    cached = _NODES_BY_ID_CACHE.get(key)
+    if cached is None:
+        cached = {clean_text(node.get("node_id")): node for node in nodes if clean_text(node.get("node_id"))}
+        _NODES_BY_ID_CACHE[key] = cached
+    return cached
 
 
 def _prepare_ref_text(text: Any) -> str:
@@ -550,6 +1044,38 @@ def extract_document_refs(text: Any) -> set[tuple[str, str]]:
     return refs
 
 
+def _node_refs_for_nodes(nodes: list[dict[str, Any]]) -> dict[str, set[tuple[str, str]]]:
+    feature = _corpus_feature(nodes)
+    cached = feature.get("node_refs")
+    if cached is not None:
+        return cached
+    refs_by_id: dict[str, set[tuple[str, str]]] = {}
+    for node in nodes:
+        node_id = clean_text(node.get("node_id"))
+        if not node_id:
+            continue
+        content = f"{node.get('content', '')} {node.get('source_ref', '')} {node.get('explicit_refs', '')}"
+        refs_by_id[node_id] = extract_document_refs(content)
+    feature["node_refs"] = refs_by_id
+    return refs_by_id
+
+
+def _node_refs_for_nodes_by_id(
+    nodes_by_id: dict[str, dict[str, Any]],
+) -> dict[str, set[tuple[str, str]]]:
+    cache_key = id(nodes_by_id)
+    cached = _NODE_REFS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    refs_by_id: dict[str, set[tuple[str, str]]] = {}
+    for node_id, node in nodes_by_id.items():
+        content = node.get("content", "")
+        text = f"{content} {node.get('source_ref', '')}"
+        refs_by_id[node_id] = set() if _looks_like_toc_entry(content) else extract_document_refs(text)
+    _NODE_REFS_CACHE[cache_key] = refs_by_id
+    return refs_by_id
+
+
 def _looks_like_toc_entry(text: Any) -> bool:
     text = clean_text(text)
     if "···" in text:
@@ -563,6 +1089,255 @@ def _question_blob(question: dict[str, Any]) -> str:
 
 def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
     return any(term.casefold() in text for term in terms)
+
+
+def _alias_in_text(alias: str, text: str) -> bool:
+    alias = clean_text(alias).casefold()
+    if not alias:
+        return False
+    if any("\u4e00" <= ch <= "\u9fff" for ch in alias):
+        return alias in text
+    return re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", text) is not None
+
+
+def matched_product_groups(question: dict[str, Any]) -> list[tuple[str, tuple[str, ...]]]:
+    blob = f" {_question_blob(question)} "
+    matches: list[tuple[str, tuple[str, ...]]] = []
+    for canonical, aliases in DATAFOUNTAIN_PRODUCT_ALIASES:
+        if _alias_in_text(canonical, blob) or any(_alias_in_text(alias, blob) for alias in aliases):
+            matches.append((canonical, aliases))
+    return matches
+
+
+def node_retrieval_text(node: dict[str, Any]) -> str:
+    return clean_text(
+        " ".join(
+            [
+                node.get("doc_id", ""),
+                node.get("product_category", ""),
+                node.get("service_intents", ""),
+                node.get("section", ""),
+                node.get("source_ref", ""),
+                node.get("previous_chunk_preview", ""),
+                node.get("content", ""),
+                node.get("next_chunk_preview", ""),
+                node.get("searchable_text", ""),
+                visual_text_for_node(node),
+            ]
+        )
+    )
+
+
+def product_route_text(node: dict[str, Any]) -> str:
+    return clean_text(
+        " ".join(
+            [
+                node.get("doc_id", ""),
+                node.get("product_category", ""),
+                node.get("section", ""),
+                node.get("source_ref", ""),
+                node.get("content", ""),
+                node.get("visual_title", ""),
+                node.get("key_objects", ""),
+                node.get("qa_evidence", ""),
+                node.get("visual_caption", ""),
+            ]
+        )
+    ).casefold()
+
+
+def product_route_scores(question: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[str, float]:
+    matches = matched_product_groups(question)
+    scores: dict[str, float] = {}
+    if not matches:
+        return {clean_text(node.get("node_id")): 0.0 for node in nodes if clean_text(node.get("node_id"))}
+
+    query_blob = f" {_question_blob(question)} "
+    product_texts = _cached_texts_for_nodes(nodes, "product")
+    for node, blob in zip(nodes, product_texts):
+        node_id = clean_text(node.get("node_id"))
+        if not node_id:
+            continue
+        doc = clean_text(node.get("doc_id")).casefold()
+        section_source = clean_text(f"{node.get('section', '')} {node.get('source_ref', '')}").casefold()
+        node_type = clean_text(node.get("node_type"))
+        best = 0.0
+        for canonical, aliases in matches:
+            terms = (canonical, *aliases)
+            query_terms = tuple(term for term in terms if _alias_in_text(term, query_blob))
+            if not query_terms:
+                continue
+            score = 0.0
+            if any(_alias_in_text(term, doc) for term in query_terms):
+                score += 0.58
+            if any(_alias_in_text(term, section_source) for term in query_terms):
+                score += 0.42
+            if any(_alias_in_text(term, blob) for term in query_terms):
+                score += 0.26
+            if node_type in VISUAL_NODE_TYPES and visual_text_for_node(node):
+                score += 0.06
+            best = max(best, min(1.0, score))
+        scores[node_id] = best
+    return scores
+
+
+def kg_policy_names_for_question(question: dict[str, Any]) -> set[str]:
+    blob = _question_blob(question)
+    names = {
+        KG_POLICY_INTENT_NAMES[intent]
+        for intent, score in after_sales_intents(question).items()
+        if score >= 0.65 and intent in KG_POLICY_INTENT_NAMES
+    }
+    for name in KG_POLICY_INTENT_NAMES.values():
+        if name.casefold() in blob:
+            names.add(name)
+    return names
+
+
+def kg_entity_type(kg_index: dict[str, Any], entity_id: str) -> str:
+    return clean_text(kg_index.get("entities", {}).get(entity_id, {}).get("entity_type"))
+
+
+def kg_query_context(question: dict[str, Any], kg_index: dict[str, Any] | None) -> dict[str, set[str]]:
+    if not kg_available(kg_index):
+        return {"entities": set(), "concrete": set(), "actions": set(), "policies": set(), "support": set()}
+    blob = f" {_question_blob(question)} "
+    strong_policy_names = kg_policy_names_for_question(question)
+    candidates: list[tuple[str, str, str, list[str]]] = []
+    for entity_id, name, aliases, entity_type in kg_index.get("entity_terms", []):
+        terms = (name, *aliases)
+        matched = [term for term in terms if _alias_in_text(term, blob)]
+        if not matched:
+            continue
+        candidates.append((entity_id, clean_text(entity_type), clean_text(name), matched))
+
+    hits: set[str] = set()
+    concrete = {entity_id for entity_id, entity_type, _, _ in candidates if entity_type in KG_CONCRETE_TYPES}
+    for entity_id, entity_type, name, matched in candidates:
+        matched_terms = {clean_text(term).casefold() for term in matched if clean_text(term)}
+        if entity_type == "image":
+            if any(len(term) > 4 and term in blob for term in matched_terms):
+                hits.add(entity_id)
+            continue
+        if entity_type == "policy":
+            has_specific_policy_term = any(term not in KG_GENERIC_POLICY_TERMS for term in matched_terms)
+            if name in strong_policy_names or has_specific_policy_term:
+                hits.add(entity_id)
+            continue
+        if entity_type == "action":
+            has_specific_action = any(term not in KG_GENERIC_ACTION_TERMS for term in matched_terms)
+            if concrete and has_specific_action:
+                hits.add(entity_id)
+            continue
+        hits.add(entity_id)
+
+    for entity_id, entity in kg_index.get("entities", {}).items():
+        if clean_text(entity.get("entity_type")) == "policy" and clean_text(entity.get("name")) in strong_policy_names:
+            hits.add(entity_id)
+
+    concrete = {entity_id for entity_id in hits if kg_entity_type(kg_index, entity_id) in KG_CONCRETE_TYPES}
+    actions = {entity_id for entity_id in hits if kg_entity_type(kg_index, entity_id) == "action"}
+    policies = {entity_id for entity_id in hits if kg_entity_type(kg_index, entity_id) == "policy"}
+    return {
+        "entities": hits,
+        "concrete": concrete,
+        "actions": actions,
+        "policies": policies,
+        "support": actions | policies,
+    }
+
+
+def kg_query_entities(question: dict[str, Any], kg_index: dict[str, Any] | None) -> set[str]:
+    return set(kg_query_context(question, kg_index)["entities"])
+
+
+def kg_route_scores(
+    question: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    kg_index: dict[str, Any] | None = None,
+) -> dict[str, float]:
+    node_ids = [clean_text(node.get("node_id")) for node in nodes if clean_text(node.get("node_id"))]
+    if not kg_available(kg_index):
+        return {node_id: 0.0 for node_id in node_ids}
+    context = kg_query_context(question, kg_index)
+    query_entities = context["entities"]
+    if not query_entities:
+        return {node_id: 0.0 for node_id in node_ids}
+
+    concrete_entities = context["concrete"]
+    action_entities = context["actions"]
+    policy_entities = context["policies"]
+    support_entities = context["support"]
+    policy_only = bool(policy_entities) and not concrete_entities and not action_entities
+    node_entities: dict[str, set[str]] = kg_index.get("node_entities", {})
+    node_relations: dict[str, list[dict[str, Any]]] = kg_index.get("node_relations", {})
+    scores: dict[str, float] = {}
+    for node in nodes:
+        node_id = clean_text(node.get("node_id"))
+        if not node_id:
+            continue
+        direct_hits = node_entities.get(node_id, set()) & query_entities
+        direct_concrete_hits = direct_hits & concrete_entities
+        direct_action_hits = direct_hits & action_entities
+        direct_policy_hits = direct_hits & policy_entities
+        node_type = clean_text(node.get("node_type"))
+        structure_type = clean_text(node.get("structure_type"))
+
+        if policy_only:
+            score = 0.0
+            if direct_policy_hits:
+                score = 0.55 + 0.12 * min(2, len(direct_policy_hits))
+                if structure_type == "after_sales_policy":
+                    score += 0.35
+                elif structure_type == "manual_profile" or node_type == "title":
+                    score = min(score, 0.18)
+                elif node_type in VISUAL_NODE_TYPES:
+                    score = min(score, 0.25)
+                else:
+                    score = min(score, 0.45)
+            scores[node_id] = min(1.0, max(0.0, score))
+            continue
+
+        score = min(
+            0.72,
+            0.30 * len(direct_concrete_hits)
+            + 0.12 * len(direct_action_hits)
+            + 0.08 * len(direct_policy_hits),
+        )
+
+        relation_bonus = 0.0
+        for relation in node_relations.get(node_id, []):
+            source_id = clean_text(relation.get("source_id"))
+            target_id = clean_text(relation.get("target_id"))
+            relation_type = clean_text(relation.get("relation_type"))
+            endpoints = {source_id, target_id}
+            endpoint_hits = endpoints & query_entities
+            if len(endpoint_hits) >= 2:
+                relation_bonus = max(relation_bonus, 0.32)
+            elif endpoint_hits and endpoints & concrete_entities:
+                relation_bonus = max(relation_bonus, 0.16)
+            if relation_type == "product_has_part" and len(endpoint_hits & concrete_entities) >= 2:
+                relation_bonus = max(relation_bonus, 0.36)
+            elif relation_type == "action_targets_part" and (endpoints & action_entities) and (endpoints & concrete_entities):
+                relation_bonus = max(relation_bonus, 0.34)
+            elif relation_type == "fault_solved_by_action" and (endpoints & action_entities) and (endpoints & concrete_entities):
+                relation_bonus = max(relation_bonus, 0.32)
+            elif relation_type in {"image_depicts_part", "image_illustrates_action"} and endpoints & (concrete_entities | action_entities):
+                relation_bonus = max(relation_bonus, 0.26 if node_type in VISUAL_NODE_TYPES else 0.18)
+            elif relation_type in {"product_supports_action", "policy_applies_to_product"} and (
+                endpoints & concrete_entities
+            ) and (endpoints & support_entities):
+                relation_bonus = max(relation_bonus, 0.2)
+        score += relation_bonus
+
+        if node_type in VISUAL_NODE_TYPES and score > 0 and node_has_visual_caption(node):
+            score += 0.08
+        if structure_type == "after_sales_policy" and direct_policy_hits:
+            score += 0.12
+        if structure_type == "manual_profile" and not direct_concrete_hits:
+            score *= 0.4
+        scores[node_id] = min(1.0, max(0.0, score))
+    return scores
 
 
 def question_intent(question: dict[str, Any]) -> dict[str, bool]:
@@ -687,12 +1462,12 @@ def visual_signal_weight(question: dict[str, Any], visual_raw: dict[str, float])
     if intent["text_fact"] and not (intent["table"] or intent["figure"] or intent["location"]):
         return 0.02
     if intent["table"] or intent["figure"]:
-        return 0.14
-    if intent["cross"] or intent["location"]:
         return 0.08
+    if intent["cross"] or intent["location"]:
+        return 0.05
     if intent["visual"]:
-        return 0.06
-    return 0.03
+        return 0.035
+    return 0.015
 
 
 def visual_grounding_scores(
@@ -853,6 +1628,29 @@ def after_sales_signal_weight(question: dict[str, Any], domain_raw: dict[str, fl
     return 0.11
 
 
+def product_signal_weight(question: dict[str, Any], product_raw: dict[str, float]) -> float:
+    if not matched_product_groups(question) or not any(score > 0 for score in product_raw.values()):
+        return 0.0
+    if is_after_sales_question(question):
+        return 0.04
+    return 0.08
+
+
+def kg_signal_weight(question: dict[str, Any], kg_raw: dict[str, float], kg_index: dict[str, Any] | None) -> float:
+    if not kg_available(kg_index) or not any(score > 0 for score in kg_raw.values()):
+        return 0.0
+    context = kg_query_context(question, kg_index)
+    if not context["entities"]:
+        return 0.0
+    if context["policies"] and not context["concrete"] and not context["actions"]:
+        return 0.025
+    if context["concrete"] and (context["actions"] or context["policies"]):
+        return 0.045 if is_after_sales_question(question) else 0.055
+    if context["concrete"]:
+        return 0.025 if is_after_sales_question(question) else 0.04
+    return 0.0
+
+
 def _reference_weight(node_type: str, refs: set[tuple[str, str]]) -> float:
     if not refs:
         return 0.0
@@ -872,13 +1670,10 @@ def reference_scores(
         return {node_id: 0.0 for node_id in candidate_ids}
 
     ordered_ids = list(nodes_by_id.keys())
-    node_refs: dict[str, set[tuple[str, str]]] = {}
+    node_refs = _node_refs_for_nodes_by_id(nodes_by_id)
     scores = {node_id: 0.0 for node_id in candidate_ids}
     for node_id, node in nodes_by_id.items():
-        content = node.get("content", "")
-        text = f"{content} {node.get('source_ref', '')}"
-        refs = set() if _looks_like_toc_entry(content) else extract_document_refs(text)
-        node_refs[node_id] = refs
+        refs = node_refs.get(node_id, set())
         hits = refs & question_refs
         if node_id in scores and hits:
             node_type = clean_text(node.get("node_type")) or "text"
@@ -1034,9 +1829,10 @@ def retrieve_candidates(
     embedding_device: str = DEFAULT_EMBEDDING_DEVICE,
     embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
     hybrid_alpha: float = 0.7,
+    kg_index: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
     doc_id = clean_text(question.get("doc_id"))
-    pool = [node for node in nodes if node_embedding_text(node)]
+    pool = _scorable_nodes(nodes)
     if doc_id:
         filtered = [node for node in pool if clean_text(node.get("doc_id")) == doc_id]
         if filtered:
@@ -1051,6 +1847,7 @@ def retrieve_candidates(
         embedding_device=embedding_device,
         embedding_batch_size=embedding_batch_size,
         hybrid_alpha=hybrid_alpha,
+        kg_index=kg_index,
     )
     ranked = sorted(pool, key=lambda node: score_by_id.get(node["node_id"], 0.0), reverse=True)
     return ranked[:top_k], score_by_id
@@ -1173,12 +1970,13 @@ def rank_question(
     embedding_device: str = DEFAULT_EMBEDDING_DEVICE,
     embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
     hybrid_alpha: float = 0.7,
+    kg_index: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     start = time.perf_counter()
-    nodes_by_id = {node["node_id"]: node for node in nodes if node.get("node_id")}
+    nodes_by_id = nodes_by_id_cached(nodes)
     graph = build_graph(nodes, edges)
     doc_id = clean_text(question.get("doc_id"))
-    similarity_pool = [node for node in nodes if node_embedding_text(node)]
+    similarity_pool = _scorable_nodes(nodes)
     if doc_id:
         doc_nodes = [node for node in similarity_pool if clean_text(node.get("doc_id")) == doc_id]
         if doc_nodes:
@@ -1193,6 +1991,7 @@ def rank_question(
         embedding_device=embedding_device,
         embedding_batch_size=embedding_batch_size,
         hybrid_alpha=hybrid_alpha,
+        kg_index=kg_index,
     )
 
     if candidate_rows:
@@ -1215,6 +2014,7 @@ def rank_question(
             embedding_device=embedding_device,
             embedding_batch_size=embedding_batch_size,
             hybrid_alpha=hybrid_alpha,
+            kg_index=kg_index,
         )
         candidate_ids = [node["node_id"] for node in candidate_nodes]
         original_scores = {node_id: candidate_scores.get(node_id, sim_scores.get(node_id, 0.0)) for node_id in candidate_ids}
@@ -1234,6 +2034,10 @@ def rank_question(
     chain_norm = normalize_scores(chain_raw, candidate_ids)
     domain_raw = after_sales_domain_scores(question, nodes_by_id, candidate_ids)
     domain_norm = normalize_scores(domain_raw, candidate_ids)
+    product_raw = product_route_scores(question, [nodes_by_id[node_id] for node_id in candidate_ids])
+    product_norm = normalize_scores(product_raw, candidate_ids)
+    kg_raw = kg_route_scores(question, [nodes_by_id[node_id] for node_id in candidate_ids], kg_index)
+    kg_norm = normalize_scores(kg_raw, candidate_ids)
     original_norm = normalize_scores(original_scores, candidate_ids)
     graph_mix = graph_signal_multipliers(question)
     ppr_multiplier = max(0.0, min(1.0, graph_mix.get("ppr", 0.0)))
@@ -1258,6 +2062,8 @@ def rank_question(
     visual_weight = visual_signal_weight(question, visual_raw)
     chain_weight = chain_signal_weight(question, chain_raw)
     domain_weight = after_sales_signal_weight(question, domain_raw)
+    product_weight = product_signal_weight(question, product_raw)
+    kg_weight = kg_signal_weight(question, kg_raw, kg_index)
     g4_scores: dict[str, float] = {}
     domain_blend = min(0.22, domain_weight * 2.0) if domain_weight > 0 else 0.0
     for node_id in candidate_ids:
@@ -1268,10 +2074,16 @@ def rank_question(
             + visual_weight * visual_norm.get(node_id, 0.0) * remaining
             + chain_weight * chain_norm.get(node_id, 0.0) * remaining
             + domain_weight * domain_norm.get(node_id, 0.0) * remaining
+            + product_weight * product_norm.get(node_id, 0.0) * remaining
+            + kg_weight * kg_norm.get(node_id, 0.0) * remaining
         )
         if domain_blend:
             raw_score = (1.0 - domain_blend) * raw_score + domain_blend * domain_norm.get(node_id, 0.0)
-        g4_scores[node_id] = min(1.0, max(0.0, raw_score))
+        g4_scores[node_id] = min(
+            1.0,
+            max(0.0, raw_score * node_answer_prior(question, nodes_by_id.get(node_id, {}))),
+        )
+    g4_scores = normalize_scores(g4_scores, candidate_ids)
 
     method_rankings: dict[str, list[tuple[str, float]]] = {
         "G0": [(node_id, original_norm.get(node_id, 0.0)) for node_id in candidate_ids],
@@ -1326,9 +2138,10 @@ def rank_question(
                     "visual_score": round(visual_norm.get(node_id, 0.0), 6),
                     "chain_score": round(chain_norm.get(node_id, 0.0), 6),
                     "domain_score": round(domain_norm.get(node_id, 0.0), 6),
+                    "kg_score": round(kg_norm.get(node_id, 0.0), 6),
                     "rerank_profile": (
                         f"visual={visual_weight:.3f};chain={chain_weight:.3f};"
-                        f"after_sales={domain_weight:.3f}"
+                        f"after_sales={domain_weight:.3f};product={product_weight:.3f};kg={kg_weight:.3f}"
                     ),
                     "has_visual_crop": int(node_has_visual_crop(node)),
                     "has_visual_caption": int(node_has_visual_caption(node)),

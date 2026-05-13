@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,14 +23,18 @@ def _env(name: str, default: str = "") -> str:
         return os.environ.get(name, default)
 
 
+DOUBAO_EMBEDDING_VISION_MODEL = "doubao-embedding-vision-250615"
+LOCAL_FALLBACK_EMBEDDING_MODEL = "BAAI/bge-m3"
+
 DEFAULT_EMBEDDING_PROVIDER = _env("RAG_EMBEDDING_PROVIDER", "auto").strip().lower() or "auto"
 DEFAULT_EMBEDDING_MODEL = (
     _env("RAG_EMBEDDING_MODEL", "").strip()
     or _env("ARK_EMBEDDING_MODEL", "").strip()
-    or "BAAI/bge-m3"
+    or (DOUBAO_EMBEDDING_VISION_MODEL if _env("ARK_API_KEY", "").strip() else LOCAL_FALLBACK_EMBEDDING_MODEL)
 )
 DEFAULT_EMBEDDING_DEVICE = _env("RAG_EMBEDDING_DEVICE", "auto")
 DEFAULT_EMBEDDING_BATCH_SIZE = int(_env("RAG_EMBEDDING_BATCH_SIZE", "16"))
+DEFAULT_EMBEDDING_WORKERS = int(_env("RAG_EMBEDDING_WORKERS", "1"))
 DEFAULT_EMBEDDING_CACHE_DIR = OUTPUT_DIR / "embeddings"
 
 ARK_EMBEDDING_MODEL_HINTS = ("doubao-embedding", "embedding-vision", "multimodal")
@@ -38,6 +43,7 @@ VISUAL_TEXT_FIELDS = (
     "visual_title",
     "visual_type",
     "key_objects",
+    "ocr_text",
     "data_or_trends",
     "qa_evidence",
     "limitations",
@@ -49,9 +55,14 @@ VISUAL_TEXT_FIELDS = (
 def node_embedding_text(node: dict[str, Any]) -> str:
     node_type = clean_text(node.get("node_type")) or "text"
     paper_domain = clean_text(node.get("paper_domain"))
+    doc_id = clean_text(node.get("doc_id"))
+    source_ref = clean_text(node.get("source_ref"))
     section = clean_text(node.get("section"))
     structure_type = clean_text(node.get("structure_type"))
     chunk_strategy = clean_text(node.get("chunk_strategy"))
+    product_category = clean_text(node.get("product_category"))
+    service_intents = clean_text(node.get("service_intents"))
+    searchable_text = clean_text(node.get("searchable_text"))
     previous_preview = clean_text(node.get("previous_chunk_preview"))
     next_preview = clean_text(node.get("next_chunk_preview"))
     explicit_refs = clean_text(node.get("explicit_refs"))
@@ -64,10 +75,18 @@ def node_embedding_text(node: dict[str, Any]) -> str:
     if not content and not visual_parts:
         return ""
     parts = [f"type: {node_type}"]
+    if doc_id:
+        parts.append(f"doc_id: {doc_id}")
     if paper_domain:
         parts.append(f"paper_domain: {paper_domain}")
+    if product_category:
+        parts.append(f"product_category: {product_category}")
+    if service_intents:
+        parts.append(f"service_intents: {service_intents}")
     if section:
         parts.append(f"section: {section}")
+    if source_ref:
+        parts.append(f"source_ref: {source_ref}")
     if structure_type:
         parts.append(f"structure_type: {structure_type}")
     if chunk_strategy:
@@ -80,6 +99,8 @@ def node_embedding_text(node: dict[str, Any]) -> str:
         parts.append(f"next_context: {next_preview}")
     if visual_parts:
         parts.append("visual_evidence:\n" + "\n".join(visual_parts))
+    if searchable_text and searchable_text != content:
+        parts.append(f"searchable_text: {searchable_text}")
     if content:
         parts.append(content)
     return "\n".join(parts)
@@ -164,6 +185,7 @@ class EmbeddingIndex:
     model_name: str = DEFAULT_EMBEDDING_MODEL
     device: str = DEFAULT_EMBEDDING_DEVICE
     batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE
+    workers: int = DEFAULT_EMBEDDING_WORKERS
     provider: str = DEFAULT_EMBEDDING_PROVIDER
     cache_dir: str | Path = DEFAULT_EMBEDDING_CACHE_DIR
 
@@ -179,6 +201,7 @@ class EmbeddingIndex:
         cache_dir: str | Path = DEFAULT_EMBEDDING_CACHE_DIR,
         device: str = DEFAULT_EMBEDDING_DEVICE,
         batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
+        workers: int = DEFAULT_EMBEDDING_WORKERS,
     ) -> "EmbeddingIndex":
         valid_nodes = [node for node in nodes if clean_text(node.get("node_id")) and node_embedding_text(node)]
         node_ids = [clean_text(node.get("node_id")) for node in valid_nodes]
@@ -216,6 +239,7 @@ class EmbeddingIndex:
             model_name=model_name,
             device=device,
             batch_size=batch_size,
+            workers=workers,
             provider=provider,
             cache_dir=cache_dir,
         )
@@ -290,22 +314,48 @@ class EmbeddingIndex:
 
         embedder = ArkMultimodalEmbedder(model=model_name)
         cache = JsonlEmbeddingCache(EmbeddingIndex._ark_cache_path(cache_dir, model_name))
-        vectors: list[list[float]] = []
         total = len(nodes)
-        for index, node in enumerate(nodes, start=1):
+        workers = max(1, int(_env("RAG_EMBEDDING_WORKERS", "1")))
+        vectors: list[list[float] | None] = [None] * total
+
+        def encode_one(index: int, node: dict[str, Any]) -> tuple[int, list[float]]:
             text = node_embedding_text(node)
             image_path = node_embedding_image_path(node)
             try:
                 if image_path:
-                    vector = embedder.embed_image_file(image_path, text=text[:1800], cache=cache)
+                    try:
+                        vector = embedder.embed_image_file(image_path, text=text[:1800], cache=cache)
+                    except Exception as image_exc:
+                        node_id = clean_text(node.get("node_id")) or f"#{index + 1}"
+                        print(
+                            f"Ark image embedding failed for node {node_id}; falling back to text embedding: {image_exc}"
+                        )
+                        vector = embedder.embed_text(text, cache=cache)
                 else:
                     vector = embedder.embed_text(text, cache=cache)
             except Exception as exc:
-                node_id = clean_text(node.get("node_id")) or f"#{index}"
+                node_id = clean_text(node.get("node_id")) or f"#{index + 1}"
                 raise RuntimeError(f"Ark embedding failed for node {node_id}: {exc}") from exc
-            vectors.append(vector)
-            if index == 1 or index % 10 == 0 or index == total:
-                print(f"Ark embedding-vision encoded {index}/{total} nodes")
+            return index, vector
+
+        if workers == 1:
+            for index, node in enumerate(nodes):
+                done_index, vector = encode_one(index, node)
+                vectors[done_index] = vector
+                completed = done_index + 1
+                if completed == 1 or completed % 10 == 0 or completed == total:
+                    print(f"Ark embedding-vision encoded {completed}/{total} nodes")
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(encode_one, index, node) for index, node in enumerate(nodes)]
+                completed = 0
+                for future in as_completed(futures):
+                    done_index, vector = future.result()
+                    vectors[done_index] = vector
+                    completed += 1
+                    if completed == 1 or completed % 10 == 0 or completed == total:
+                        print(f"Ark embedding-vision encoded {completed}/{total} nodes")
+
         return EmbeddingIndex._normalize_rows(np.asarray(vectors, dtype="float32"))
 
     @property

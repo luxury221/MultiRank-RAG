@@ -6,6 +6,7 @@ import json
 import math
 import mimetypes
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -68,6 +69,7 @@ class JsonlEmbeddingCache:
     def __post_init__(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._items: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
         if self.path.exists():
             with self.path.open("r", encoding="utf-8") as f:
                 for line in f:
@@ -111,14 +113,16 @@ class JsonlEmbeddingCache:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def get(self, key: str) -> list[float] | None:
-        return self._items.get(key)
+        with self._lock:
+            return self._items.get(key)
 
     def put(self, key: str, embedding: list[float]) -> None:
-        if key in self._items:
-            return
-        self._items[key] = embedding
-        with self.path.open("a", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps({"key": key, "embedding": embedding}, ensure_ascii=False) + "\n")
+        with self._lock:
+            if key in self._items:
+                return
+            self._items[key] = embedding
+            with self.path.open("a", encoding="utf-8", newline="\n") as f:
+                f.write(json.dumps({"key": key, "embedding": embedding}, ensure_ascii=False) + "\n")
 
 
 @dataclass

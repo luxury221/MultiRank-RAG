@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from embedding_index import (
     DEFAULT_EMBEDDING_BATCH_SIZE,
@@ -23,6 +23,7 @@ from pipeline_common import (
     write_csv,
 )
 from rerank_lib import rank_question
+from rerank_lib import load_kg_index
 
 
 RANKING_FIELDS = [
@@ -42,6 +43,7 @@ RANKING_FIELDS = [
     "visual_score",
     "chain_score",
     "domain_score",
+    "kg_score",
     "rerank_profile",
     "has_visual_crop",
     "has_visual_caption",
@@ -79,12 +81,14 @@ def main() -> None:
     parser.add_argument("--lambda-b", type=float, default=0.15)
     parser.add_argument("--lambda-r", type=float, default=0.1)
     parser.add_argument("--tau", type=float, default=0.2)
-    parser.add_argument("--retriever", choices=["fusion", "hybrid", "embedding", "lexical"], default="fusion")
+    parser.add_argument("--retriever", choices=["fusion", "hybrid", "embedding", "lexical", "bm25", "kg"], default="fusion")
     parser.add_argument("--embedding-model", default=DEFAULT_EMBEDDING_MODEL)
     parser.add_argument("--embedding-cache", default="outputs/embeddings")
     parser.add_argument("--embedding-device", default=DEFAULT_EMBEDDING_DEVICE)
     parser.add_argument("--embedding-batch-size", type=int, default=DEFAULT_EMBEDDING_BATCH_SIZE)
     parser.add_argument("--hybrid-alpha", type=float, default=0.7, help="Embedding weight for --retriever hybrid.")
+    parser.add_argument("--kg-dir", default="outputs/kg", help="KG-lite directory. Empty string disables KG scoring.")
+    parser.add_argument("--resume", action="store_true", help="Reuse complete question rows already present in output.")
     args = parser.parse_args()
 
     ensure_project_dirs()
@@ -101,10 +105,27 @@ def main() -> None:
             device=args.embedding_device,
             batch_size=args.embedding_batch_size,
         )
+    kg_index = load_kg_index(args.kg_dir)
 
     rows: list[dict[str, object]] = []
-    for question in questions:
+    completed_qids: set[str] = set()
+    if args.resume and resolve_path(args.output).exists():
+        existing_rows = read_csv(args.output)
+        expected_rows_per_question = args.top_k * 5
+        counts = Counter(row.get("question_id", "") for row in existing_rows if row.get("question_id"))
+        completed_qids = {qid for qid, count in counts.items() if count >= expected_rows_per_question}
+        rows = [row for row in existing_rows if row.get("question_id", "") in completed_qids]
+        print(
+            f"Resuming from {resolve_path(args.output)}; "
+            f"kept {len(rows)} rows for {len(completed_qids)} complete questions.",
+            flush=True,
+        )
+
+    processed = 0
+    for index, question in enumerate(questions, start=1):
         qid = question.get("question_id", "")
+        if qid in completed_qids:
+            continue
         rows.extend(
             rank_question(
                 question,
@@ -126,8 +147,14 @@ def main() -> None:
                 embedding_device=args.embedding_device,
                 embedding_batch_size=args.embedding_batch_size,
                 hybrid_alpha=args.hybrid_alpha,
+                kg_index=kg_index,
             )
         )
+        processed += 1
+        if processed == 1 or processed % 10 == 0 or index == len(questions):
+            print(f"Reranked {index}/{len(questions)} questions; processed={processed}; rows={len(rows)}", flush=True)
+        if processed % 5 == 0:
+            write_csv(args.output, rows, RANKING_FIELDS)
 
     write_csv(args.output, rows, RANKING_FIELDS)
     print(f"Wrote {len(rows)} ranking rows to {resolve_path(args.output)}")

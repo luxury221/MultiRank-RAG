@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import uuid
@@ -31,7 +32,7 @@ from embedding_index import (  # noqa: E402
     EmbeddingIndex,
 )
 from pipeline_common import clean_text, normalize_doc_id, preview, write_csv, write_jsonl  # noqa: E402
-from rerank_lib import answer_for_question, build_graph, rank_question, retrieve_candidates  # noqa: E402
+from rerank_lib import answer_for_question, build_graph, load_kg_index, rank_question, retrieve_candidates  # noqa: E402
 
 
 app = FastAPI(title="Multimodal RAG Evidence API")
@@ -141,6 +142,7 @@ def candidate_rows_for_question(
     nodes: list[dict[str, Any]],
     job: Path | None = None,
     embedding_index: EmbeddingIndex | None = None,
+    kg_index: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     candidate_k = int(os.getenv("RAG_BACKEND_CANDIDATE_K", "50"))
     retriever = os.getenv("RAG_BACKEND_CANDIDATE_RETRIEVER", "fusion")
@@ -155,6 +157,7 @@ def candidate_rows_for_question(
         embedding_device=os.getenv("RAG_EMBEDDING_DEVICE", DEFAULT_EMBEDDING_DEVICE),
         embedding_batch_size=int(os.getenv("RAG_EMBEDDING_BATCH_SIZE", str(DEFAULT_EMBEDDING_BATCH_SIZE))),
         hybrid_alpha=float(os.getenv("RAG_BACKEND_HYBRID_ALPHA", "0.7")),
+        kg_index=kg_index,
     )
     rows: list[dict[str, Any]] = []
     for rank, node in enumerate(candidates, start=1):
@@ -196,6 +199,56 @@ def build_embedding_index_for_backend(nodes: list[dict[str, Any]], job: Path) ->
         device=device,
         batch_size=batch_size,
     )
+
+
+def backend_kg_enabled() -> bool:
+    value = env_value("RAG_BACKEND_ENABLE_KG", env_value("RAG_ENABLE_KG", "1")).strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def build_kg_index_for_backend(job_id: str, job: Path, nodes_path: Path) -> dict[str, Any]:
+    if not backend_kg_enabled():
+        append_log(job_id, "KG-lite is disabled for this backend job.")
+        return {}
+    kg_dir = job / "kg"
+    text_index_dir = job / "text_index"
+    visual_index_dir = job / "visual_index"
+    cmd = [
+        sys.executable,
+        str(SCRIPTS_DIR / "23_build_datafountain_kg.py"),
+        "--nodes",
+        str(nodes_path),
+        "--kg-dir",
+        str(kg_dir),
+        "--text-dir",
+        str(text_index_dir),
+        "--visual-dir",
+        str(visual_index_dir),
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
+        )
+    except Exception as exc:
+        append_log(job_id, f"KG-lite build failed: {exc}")
+        return {}
+    if result.returncode != 0:
+        detail = clean_text(result.stderr or result.stdout)
+        append_log(job_id, f"KG-lite build failed: {preview(detail, 360)}")
+        return {}
+    kg_index = load_kg_index(kg_dir)
+    append_log(
+        job_id,
+        f"KG-lite enabled: {len(kg_index.get('entities', {}))} entities, "
+        f"{len(kg_index.get('relations', []))} relations.",
+    )
+    return kg_index
 
 
 def rel_file_url(job_id: str, path: str | Path) -> str:
@@ -245,6 +298,8 @@ def normalize_ranking_for_frontend(job_id: str, rows: list[dict[str, Any]]) -> d
                 "bridge_score": float(row.get("bridge_score") or 0.0),
                 "ref_score": float(row.get("ref_score") or 0.0),
                 "visual_score": float(row.get("visual_score") or 0.0),
+                "kg_score": float(row.get("kg_score") or 0.0),
+                "rerank_profile": row.get("rerank_profile", ""),
                 "has_visual_crop": int(row.get("has_visual_crop") or 0),
                 "has_visual_caption": int(row.get("has_visual_caption") or 0),
                 "source_ref": row.get("source_ref", ""),
@@ -274,6 +329,74 @@ def write_csv_dicts(path: Path, rows: list[dict[str, Any]]) -> None:
 def normalize_chunk_template(value: str) -> str:
     value = clean_text(value).lower() or "auto"
     return value if value in {"auto", "general", "ai", "math", "finance", "medical"} else "auto"
+
+
+VISUAL_CAPTION_PROVIDERS = {"local", "qwen", "doubao"}
+
+
+def env_value(name: str, default: str = "") -> str:
+    try:
+        from ark_clients import get_env
+
+        return get_env(name, default)
+    except Exception:
+        return os.getenv(name, default)
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(env_value(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    try:
+        return float(env_value(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def default_backend_visual_caption_provider() -> str:
+    provider = clean_text(
+        env_value("RAG_BACKEND_VISUAL_CAPTION_PROVIDER")
+        or env_value("RAG_VISUAL_CAPTION_PROVIDER")
+        or ""
+    ).lower()
+    if provider in VISUAL_CAPTION_PROVIDERS:
+        return provider
+    return "qwen" if env_value("DASHSCOPE_API_KEY") else "local"
+
+
+def build_backend_captioner(job_id: str):
+    provider = default_backend_visual_caption_provider()
+    if provider == "qwen":
+        captioner = visual_evidence.QwenVisionCaptioner(
+            model_name=env_value("RAG_BACKEND_QWEN_MODEL")
+            or env_value("RAG_QWEN_VL_MODEL")
+            or visual_evidence.QWEN_DEFAULT_MODEL,
+            base_url=env_value("RAG_QWEN_BASE_URL", visual_evidence.QWEN_DEFAULT_BASE_URL),
+            api_key_env=env_value("RAG_QWEN_API_KEY_ENV", "DASHSCOPE_API_KEY"),
+            timeout=env_float("RAG_QWEN_TIMEOUT", 60.0),
+        )
+        if captioner.available():
+            return captioner, "qwen"
+        append_log(job_id, "Qwen visual caption is enabled but the API key is unavailable; using crops only.")
+        return visual_evidence.VisualCaptioner(""), "local"
+    if provider == "doubao":
+        captioner = visual_evidence.ArkVisionCaptioner(
+            model_name=env_value("RAG_BACKEND_ARK_VISION_MODEL") or env_value("RAG_ARK_VISION_MODEL", ""),
+            base_url=env_value("RAG_ARK_BASE_URL", visual_evidence.ARK_DEFAULT_BASE_URL),
+            api_key_env=env_value("RAG_ARK_API_KEY_ENV", "ARK_API_KEY"),
+            timeout=env_float("RAG_ARK_TIMEOUT", 60.0),
+        )
+        if captioner.available():
+            return captioner, "doubao"
+        append_log(job_id, "Doubao visual caption is enabled but ARK_API_KEY or model is unavailable; using crops only.")
+        return visual_evidence.VisualCaptioner(""), "local"
+    caption_model = env_value("RAG_BACKEND_VISUAL_CAPTION_MODEL", "")
+    caption_device = env_value("RAG_BACKEND_VISUAL_CAPTION_DEVICE", "auto")
+    return visual_evidence.VisualCaptioner(caption_model, caption_device) if caption_model else visual_evidence.VisualCaptioner(""), "local"
 
 
 def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_template: str = "auto") -> None:
@@ -321,19 +444,32 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
         write_status(job_id, chunk_template=chunk_template, chunk_report=chunk_report)
 
         write_status(job_id, stage="visual", progress=24)
-        append_log(job_id, "正在为页面和证据节点生成视觉裁剪图")
-        captioner = visual_evidence.VisualCaptioner("")
-        visual_evidence.process_document(
+        captioner, visual_caption_provider = build_backend_captioner(job_id)
+        visual_max_captions = env_int(
+            "RAG_BACKEND_VISUAL_MAX_CAPTIONS",
+            env_int("RAG_VISUAL_MAX_CAPTIONS", 0),
+        )
+        append_log(
+            job_id,
+            f"Generating visual crops and {visual_caption_provider} captions before embedding.",
+        )
+        visual_caption_count = visual_evidence.process_document(
             pdf_path,
             nodes,
             job / "visual",
-            int(os.getenv("RAG_BACKEND_VISUAL_DPI", "120")),
+            env_int("RAG_BACKEND_VISUAL_DPI", 120),
             captioner,
-            0,
+            visual_max_captions,
             0,
             set(),
             True,
             "",
+        )
+        write_status(
+            job_id,
+            visual_caption_provider=visual_caption_provider,
+            visual_caption_model=getattr(captioner, "model_name", ""),
+            visual_caption_count=visual_caption_count,
         )
         write_jsonl(job / "nodes.jsonl", nodes)
 
@@ -342,13 +478,23 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
         edges = build_graph_edges.build_edges(nodes)
         write_jsonl(job / "edges.jsonl", edges)
 
-        write_status(job_id, stage="retrieve", progress=52)
+        write_status(job_id, stage="kg", progress=46)
+        append_log(job_id, "Building KG-lite entity/relation index and visual index.")
+        kg_index = build_kg_index_for_backend(job_id, job, job / "nodes.jsonl")
+        write_status(
+            job_id,
+            kg_enabled=bool(kg_index),
+            kg_entity_count=len(kg_index.get("entities", {})),
+            kg_relation_count=len(kg_index.get("relations", [])),
+        )
+
+        write_status(job_id, stage="retrieve", progress=56)
         append_log(job_id, "正在召回候选证据")
         embedding_index = build_embedding_index_for_backend(nodes, job)
-        candidate_rows = candidate_rows_for_question(question, nodes, job, embedding_index)
+        candidate_rows = candidate_rows_for_question(question, nodes, job, embedding_index, kg_index)
         write_csv_dicts(job / "candidates.csv", candidate_rows)
 
-        write_status(job_id, stage="rerank", progress=68)
+        write_status(job_id, stage="rerank", progress=70)
         append_log(job_id, "正在进行 G4 证据重排序")
         rerank_retriever = os.getenv("RAG_BACKEND_RERANK_RETRIEVER", "fusion")
         ranking_rows = rank_question(
@@ -364,10 +510,11 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
             embedding_device=os.getenv("RAG_EMBEDDING_DEVICE", DEFAULT_EMBEDDING_DEVICE),
             embedding_batch_size=int(os.getenv("RAG_EMBEDDING_BATCH_SIZE", str(DEFAULT_EMBEDDING_BATCH_SIZE))),
             hybrid_alpha=float(os.getenv("RAG_BACKEND_HYBRID_ALPHA", "0.7")),
+            kg_index=kg_index,
         )
         write_csv_dicts(job / "reranked.csv", ranking_rows)
 
-        write_status(job_id, stage="chain", progress=82)
+        write_status(job_id, stage="chain", progress=84)
         append_log(job_id, "正在生成证据链")
         g4_rows = [row for row in ranking_rows if row.get("method") == "G4"]
         graph = build_graph(nodes, edges)
@@ -382,7 +529,7 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
         write_csv_dicts(job / "chain_steps.csv", steps)
         question["answer"] = answer_for_question(question, steps or g4_rows)
 
-        write_status(job_id, stage="card", progress=92)
+        write_status(job_id, stage="card", progress=93)
         append_log(job_id, "正在生成证据卡片")
         card_path = job / "evidence_card.png"
         if steps:
@@ -409,7 +556,13 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
                 "visual_node_steps": len([step for step in normalized_steps if step.get("node_type") in {"table", "figure", "caption"}]),
                 "crop_steps": len([step for step in normalized_steps if step.get("crop_url")]),
                 "existing_crop_steps": len([step for step in normalized_steps if step.get("crop_url")]),
-                "qwen_caption_steps": 0,
+                "qwen_caption_steps": sum(1 for step in normalized_steps if clean_text(step.get("visual_caption"))),
+                "visual_caption_provider": visual_caption_provider,
+                "visual_caption_model": getattr(captioner, "model_name", ""),
+                "visual_caption_count": visual_caption_count,
+                "kg_enabled": bool(kg_index),
+                "kg_entity_count": len(kg_index.get("entities", {})),
+                "kg_relation_count": len(kg_index.get("relations", [])),
                 "source_pages": sorted({str(step.get("page")) for step in normalized_steps if step.get("page")}),
             },
             "steps": normalized_steps,

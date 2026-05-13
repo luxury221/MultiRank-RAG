@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 import json
 import re
+import sys
 import threading
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ from pipeline_common import clean_text, preview, read_csv, read_jsonl, resolve_p
 DEFAULT_QUESTIONS = "outputs/after_sales_kb/questions.csv"
 DEFAULT_NODES = "outputs/after_sales_kb/nodes.jsonl"
 DEFAULT_RANKINGS = "outputs/after_sales_kb/reranked.csv"
+DEFAULT_VISUAL_INDEX = "outputs/visual_index/images.jsonl"
 DEFAULT_OUTPUT = "outputs/after_sales_kb/submission_llm_rubric.csv"
 DEFAULT_CACHE = "outputs/after_sales_kb/submission_llm_rubric_cache.jsonl"
 
@@ -42,6 +44,86 @@ SERVICE_TERMS = (
     "二手",
     "赔偿",
     "质保",
+    "return",
+    "refund",
+    "exchange",
+    "warranty",
+    "repair",
+    "complaint",
+)
+
+MANUAL_IMAGE_TERMS = (
+    "如何",
+    "怎么",
+    "步骤",
+    "安装",
+    "拆卸",
+    "拆除",
+    "更换",
+    "清洁",
+    "连接",
+    "设置",
+    "调节",
+    "调整",
+    "打开",
+    "关闭",
+    "添加",
+    "使用",
+    "按钮",
+    "接口",
+    "指示灯",
+    "部件",
+    "位置",
+    "图",
+    "图片",
+    "install",
+    "remove",
+    "replace",
+    "clean",
+    "connect",
+    "adjust",
+    "set up",
+    "setup",
+    "open",
+    "close",
+    "steps",
+    "how",
+    "what should i do",
+    "turn on",
+    "turn off",
+    "reset",
+    "charge",
+    "flush",
+    "inspect",
+    "check",
+    "maintain",
+    "maintenance",
+    "move forward",
+    "sail",
+    "cleaning",
+    "button",
+    "interface",
+    "indicator",
+    "led",
+    "part",
+    "position",
+    "diagram",
+)
+
+UNCERTAIN_ANSWER_TERMS = (
+    "没有相关信息",
+    "未包含",
+    "未提及",
+    "未记录",
+    "暂未",
+    "无法回答",
+    "no relevant information",
+    "does not include",
+    "does not contain",
+    "not include specific",
+    "not contain complete",
+    "provided reference material does not",
+    "currently provided reference",
 )
 
 
@@ -57,7 +139,34 @@ def is_english(text: str) -> bool:
 
 
 def is_service_question(question: str) -> bool:
-    return any(term in question for term in SERVICE_TERMS)
+    blob = clean_text(question).casefold()
+    return any(term.casefold() in blob for term in SERVICE_TERMS)
+
+
+def is_manual_visual_question(question: str) -> bool:
+    blob = clean_text(question).casefold()
+    if is_service_question(question):
+        return False
+    return any(term.casefold() in blob for term in MANUAL_IMAGE_TERMS)
+
+
+def is_uncertain_answer(text: str) -> bool:
+    blob = clean_text(text).casefold()
+    return any(term.casefold() in blob for term in UNCERTAIN_ANSWER_TERMS)
+
+
+def node_has_visual_caption(node: dict[str, Any]) -> bool:
+    return bool(clean_text(node.get("visual_caption")) or clean_text(node.get("qa_evidence")))
+
+
+def image_node_is_useful(node: dict[str, Any], question: str) -> bool:
+    if clean_text(node.get("node_type")) != "figure":
+        return False
+    if not is_manual_visual_question(question):
+        return False
+    if node_has_visual_caption(node):
+        return True
+    return bool(clean_text(node.get("source_ref")) or clean_text(node.get("content")))
 
 
 def image_id_from_node(node: dict[str, Any]) -> str:
@@ -76,9 +185,41 @@ def image_id_from_node(node: dict[str, Any]) -> str:
     return ""
 
 
+def normalize_pic_suffix(text: str) -> str:
+    text = clean_text(text)
+    pic_match = re.search(r"\s*<PIC>\s*(.*?)\s*(?:</PIC>)?\s*$", text)
+    if not pic_match:
+        return text
+
+    raw_ids = pic_match.group(1).strip().lstrip(";").strip()
+    base_text = text[: pic_match.start()].strip()
+    if not raw_ids:
+        return base_text
+
+    if raw_ids.startswith("["):
+        try:
+            parsed = json.loads(raw_ids)
+        except json.JSONDecodeError:
+            parsed = re.findall(r"[A-Za-z0-9_\-]+", raw_ids)
+    else:
+        parsed = re.findall(r"[A-Za-z0-9_\-]+", raw_ids)
+    image_ids = []
+    for item in parsed if isinstance(parsed, list) else []:
+        image_id = clean_text(item)
+        if image_id and image_id not in image_ids:
+            image_ids.append(image_id)
+        if len(image_ids) >= 3:
+            break
+    if not image_ids:
+        return base_text
+    return f"{base_text} <PIC> ;{json.dumps(image_ids, ensure_ascii=False)}".strip()
+
+
 def clean_submission_text(text: str, limit: int = 760) -> str:
     text = clean_text(text).replace("```", "")
-    text = re.sub(r"^\s*(答案|ret|输出)\s*[:：]\s*", "", text, flags=re.I)
+    text = re.sub(r"^\s*(答案|输出)\s*[:：]?\s*", "", text, flags=re.I)
+    text = re.sub(r"^\s*ret\b\s*[:：]?\s*", "", text, flags=re.I)
+    text = normalize_pic_suffix(text)
     text = re.sub(r"\s+", " ", text)
     if len(text) <= limit:
         return text
@@ -90,12 +231,33 @@ def clean_submission_text(text: str, limit: int = 760) -> str:
     cut = text[: max(80, limit - len(pic_part) - 2)]
     for sep in ["。", "；", ";", ".", "！", "!", "？", "?"]:
         pos = cut.rfind(sep)
+        if sep == "." and pos > 0 and cut[pos - 1].isdigit():
+            continue
         if pos >= len(cut) * 0.55:
             cut = cut[: pos + 1]
             break
     else:
         cut = cut.rstrip("，,、；;：: ") + ("." if is_english(cut) else "。")
     return f"{cut} {pic_part}".strip() if pic_part else cut
+
+
+def strip_pic_suffix(text: str) -> str:
+    return clean_text(
+        re.sub(
+            r"\s*<PIC>\s*(?:;?\s*\[[^\]]+\]|;?\s*[A-Za-z0-9_\-]+|[A-Za-z0-9_\-]+\s*</PIC>)\s*$",
+            "",
+            text,
+        )
+    )
+
+
+def safe_print(message: Any, flush: bool = True) -> None:
+    text = str(message)
+    encoding = sys.stdout.encoding or "utf-8"
+    try:
+        print(text, flush=flush)
+    except UnicodeEncodeError:
+        print(text.encode(encoding, errors="replace").decode(encoding, errors="replace"), flush=flush)
 
 
 def focused_content(node: dict[str, Any], question: str, limit: int = 900) -> str:
@@ -106,6 +268,12 @@ def focused_content(node: dict[str, Any], question: str, limit: int = 900) -> st
                 node.get("previous_chunk_preview", ""),
                 node.get("content", ""),
                 node.get("next_chunk_preview", ""),
+                node.get("visual_title", ""),
+                node.get("key_objects", ""),
+                node.get("ocr_text", ""),
+                node.get("data_or_trends", ""),
+                node.get("qa_evidence", ""),
+                node.get("visual_caption", ""),
                 node.get("visual_summary", ""),
             ]
         )
@@ -145,18 +313,154 @@ def load_rankings(path: str | Path) -> dict[str, list[dict[str, str]]]:
     return groups
 
 
+def load_visual_index(path: str | Path) -> list[dict[str, Any]]:
+    file_path = resolve_path(path)
+    if not file_path.exists():
+        return []
+    return read_jsonl(file_path)
+
+
+def relevance_score(question: str, text: str) -> float:
+    question = clean_text(question).casefold()
+    text = clean_text(text).casefold()
+    if not question or not text:
+        return 0.0
+    q_terms = set(re.findall(r"[a-z][a-z0-9_-]{2,}|[\u4e00-\u9fff]", question))
+    if not q_terms:
+        return 0.0
+    hits = sum(1 for term in q_terms if term in text)
+    coverage = hits / max(1, len(q_terms))
+    density = hits / max(12, len(re.findall(r"[a-z][a-z0-9_-]{2,}|[\u4e00-\u9fff]", text)))
+    return min(1.0, 0.8 * coverage + 2.0 * density)
+
+
+def visual_candidate_text(node: dict[str, Any], visual_row: dict[str, Any] | None = None) -> str:
+    visual_row = visual_row or {}
+    return clean_text(
+        " ".join(
+            [
+                node.get("doc_id", ""),
+                node.get("section", ""),
+                node.get("source_ref", ""),
+                node.get("content", ""),
+                node.get("visual_title", ""),
+                node.get("key_objects", ""),
+                node.get("ocr_text", ""),
+                node.get("data_or_trends", ""),
+                node.get("qa_evidence", ""),
+                node.get("visual_caption", ""),
+                node.get("visual_summary", ""),
+                visual_row.get("visual_title", ""),
+                visual_row.get("key_objects", ""),
+                visual_row.get("ocr_text", ""),
+                visual_row.get("qa_evidence", ""),
+                visual_row.get("visual_caption", ""),
+            ]
+        )
+    )
+
+
+def rerank_images_second_stage(
+    question: str,
+    ranking_rows: list[dict[str, str]],
+    nodes_by_id: dict[str, dict[str, Any]],
+    visual_index: list[dict[str, Any]],
+    max_images: int = 3,
+) -> list[str]:
+    if not is_manual_visual_question(question):
+        return []
+    visual_by_node = {clean_text(row.get("node_id")): row for row in visual_index if clean_text(row.get("node_id"))}
+    candidate_nodes: dict[str, tuple[dict[str, Any], dict[str, Any], float]] = {}
+    for rank_pos, row in enumerate(ranking_rows[:30], start=1):
+        node = nodes_by_id.get(clean_text(row.get("node_id")), {})
+        image_id = image_id_from_node(node)
+        if not image_id or not image_node_is_useful(node, question):
+            continue
+        rank_bonus = max(0.0, (31 - rank_pos) / 30.0)
+        score = 0.25 * rank_bonus
+        try:
+            ranking_score = float(row.get("score") or 0.0)
+        except (TypeError, ValueError):
+            ranking_score = 0.0
+        score += 0.25 * max(0.0, ranking_score)
+        candidate_nodes[image_id] = (node, visual_by_node.get(clean_text(node.get("node_id")), {}), score)
+
+    ranking_node_ids = {clean_text(row.get("node_id")) for row in ranking_rows[:30]}
+    for visual_row in visual_index:
+        node_id = clean_text(visual_row.get("node_id"))
+        if node_id not in ranking_node_ids:
+            continue
+        node = nodes_by_id.get(node_id, {})
+        image_id = clean_text(visual_row.get("image_id")) or image_id_from_node(node)
+        if not image_id or not image_node_is_useful(node, question):
+            continue
+        candidate_nodes.setdefault(image_id, (node, visual_row, 0.1))
+
+    scored: list[tuple[float, str, dict[str, Any]]] = []
+    for image_id, (node, visual_row, base_score) in candidate_nodes.items():
+        text = visual_candidate_text(node, visual_row)
+        score = base_score + 0.55 * relevance_score(question, text)
+        if node_has_visual_caption(node) or clean_text(visual_row.get("qa_evidence")):
+            score += 0.18
+        if clean_text(node.get("ocr_text")) or clean_text(visual_row.get("ocr_text")):
+            score += 0.04
+        scored.append((score, image_id, node))
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    selected: list[str] = []
+    uncaptioned = 0
+    for score, image_id, node in scored:
+        if score < 0.18 and selected:
+            continue
+        if not node_has_visual_caption(node):
+            if uncaptioned >= 1:
+                continue
+            uncaptioned += 1
+        selected.append(image_id)
+        if len(selected) >= max_images:
+            break
+    return selected
+
+
 def select_evidence(
     question: str,
     ranking_rows: list[dict[str, str]],
     nodes_by_id: dict[str, dict[str, Any]],
     max_items: int,
+    visual_index: list[dict[str, Any]] | None = None,
+    visual_second_stage: bool = True,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     service_question = is_service_question(question)
+    allow_images = is_manual_visual_question(question)
     selected: list[dict[str, Any]] = []
     images: list[str] = []
+    uncaptioned_images = 0
     seen: set[str] = set()
 
-    for row in ranking_rows[:18]:
+    def row_priority(row: dict[str, str]) -> tuple[float, int]:
+        node = nodes_by_id.get(clean_text(row.get("node_id")), {})
+        node_id = clean_text(node.get("node_id"))
+        node_type = clean_text(node.get("node_type"))
+        structure_type = clean_text(node.get("structure_type"))
+        rank = int(row.get("rank") or 9999)
+        penalty = 0.0
+        if node_id.startswith("AS_PROFILE_") or structure_type == "manual_profile":
+            penalty += 20.0
+        if node_type == "title":
+            penalty += 4.0
+        elif node_type == "page":
+            penalty += 8.0
+        elif node_type in {"figure", "caption"} and not node_has_visual_caption(node):
+            penalty += 3.0
+        elif node_type == "text":
+            penalty -= 1.5
+        if service_question and node_type in {"figure", "caption"}:
+            penalty += 6.0
+        return penalty + rank, rank
+
+    evidence_rows = sorted(ranking_rows[:30], key=row_priority)
+
+    for row in evidence_rows:
         node = nodes_by_id.get(clean_text(row.get("node_id")), {})
         if not node:
             continue
@@ -175,8 +479,13 @@ def select_evidence(
         seen.add(node_id)
         selected.append({"row": row, "node": node})
         image_id = image_id_from_node(node)
-        if image_id and image_id not in images and node_type == "figure":
-            images.append(image_id)
+        if allow_images and image_id and image_id not in images and image_node_is_useful(node, question):
+            if not node_has_visual_caption(node) and uncaptioned_images >= 1:
+                pass
+            else:
+                if not node_has_visual_caption(node):
+                    uncaptioned_images += 1
+                images.append(image_id)
         if len(selected) >= max_items:
             break
 
@@ -186,13 +495,29 @@ def select_evidence(
             if node:
                 selected.append({"row": row, "node": node})
 
-    for row in ranking_rows[:12]:
-        node = nodes_by_id.get(clean_text(row.get("node_id")), {})
-        image_id = image_id_from_node(node)
-        if image_id and image_id not in images and clean_text(node.get("node_type")) == "figure":
-            images.append(image_id)
-        if len(images) >= 3:
-            break
+    if allow_images and visual_second_stage:
+        reranked_images = rerank_images_second_stage(
+            question,
+            ranking_rows,
+            nodes_by_id,
+            visual_index or [],
+            max_images=3,
+        )
+        if reranked_images:
+            images = reranked_images
+
+    if allow_images and not images:
+        for row in ranking_rows[:12]:
+            node = nodes_by_id.get(clean_text(row.get("node_id")), {})
+            image_id = image_id_from_node(node)
+            if image_id and image_id not in images and image_node_is_useful(node, question):
+                if not node_has_visual_caption(node) and uncaptioned_images >= 1:
+                    continue
+                if not node_has_visual_caption(node):
+                    uncaptioned_images += 1
+                images.append(image_id)
+            if len(images) >= 3:
+                break
     return selected, images[:3]
 
 
@@ -219,16 +544,20 @@ def build_prompt(question: str, evidence: list[dict[str, Any]], images: list[str
     english = is_english(question)
     service_question = is_service_question(question)
     language_rule = "Answer in English." if english else "请用中文回答。"
-    image_rule = (
-        f"可用图片 id: {json.dumps(images, ensure_ascii=False)}。如果图片能帮助理解步骤、部件、表格或位置，"
-        "请在答案末尾追加 `<PIC> ;[\"图片id1\", \"图片id2\"]`，最多 3 张。"
-        if images
-        else "没有可用图片时不要写 <PIC>。"
-    )
+    if service_question:
+        image_rule = "这是售后政策、维修、投诉或交易规则类问题，不要追加 <PIC>；只给处理流程和责任口径。"
+    elif images:
+        image_rule = (
+            f"可用图片 id: {json.dumps(images, ensure_ascii=False)}。如果图片能帮助理解步骤、部件、表格或位置，"
+            "请在答案末尾追加 `<PIC> ;[\"图片id1\", \"图片id2\"]`，最多 3 张；不要编造不在列表中的图片 id。"
+        )
+    else:
+        image_rule = "没有可用图片时不要写 <PIC>。"
     system_prompt = (
         "你是比赛中的高质量多模态客服智能体答案生成器。评分标准重视：直接回应问题、结构清晰、"
         "答案完整有深度、图文互补。不要写空泛套话，不要只说“以平台为准/联系售后”。"
-        "只能依据证据和常识客服流程回答；证据不足时也要给出可执行处理步骤。最终只输出 ret 字段内容。"
+        "只能依据证据和常识客服流程回答；证据不足时也要优先根据最相关证据和产品常识给出可执行步骤，"
+        "不要把答案写成“资料未提供/无法回答”。最终只输出 ret 字段内容。"
     )
     style_rule = (
         "这是售后服务问题：请明确责任判断、处理步骤、凭证要求、时效或费用口径；少用模糊话。"
@@ -246,8 +575,9 @@ def build_prompt(question: str, evidence: list[dict[str, Any]], images: list[str
 2. {style_rule}
 3. 回答要像客服最终回复，不要说“根据证据1/2”，不要输出 Markdown。
 4. 如果问题问“如何做”，请用步骤；如果问“是什么/有哪些”，请列出关键点。
-5. {image_rule}
-6. 中文控制在 120-350 字，英文控制在 80-220 words。"""
+5. 不要输出“资料中没有相关信息/does not include”等拒答式话术；如果证据不完整，请给出保守但可执行的通用步骤并说明注意安全。
+6. {image_rule}
+7. 中文控制在 120-350 字，英文控制在 80-220 words。"""
     return system_prompt, user_prompt
 
 
@@ -261,7 +591,7 @@ def fallback_answer(question: str, evidence: list[dict[str, Any]], images: list[
     answer = " ".join(parts)
     if not answer:
         answer = "您好，已收到您的问题。建议您提供商品型号、订单信息和具体情况，我们会结合手册或售后规则进一步处理。"
-    if images and not is_service_question(question):
+    if images and is_manual_visual_question(question):
         answer += f" <PIC> ;{json.dumps(images, ensure_ascii=False)}"
     return clean_submission_text(answer)
 
@@ -312,6 +642,50 @@ def thread_chat_client() -> ArkChatClient:
     return chat
 
 
+def self_check_answer(
+    question: str,
+    evidence: list[dict[str, Any]],
+    images: list[str],
+    ret: str,
+) -> str:
+    if not ret:
+        return ret
+    service_question = is_service_question(question)
+    image_rule = (
+        "This is a policy/service question: remove any <PIC> suffix."
+        if service_question
+        else f"Only keep a <PIC> suffix if it is useful and the image ids are in this list: {json.dumps(images, ensure_ascii=False)}."
+    )
+    system_prompt = (
+        "You are a strict DataFountain submission answer reviewer. "
+        "Revise the answer only when it misses a sub-question, invents unsupported details, has an invalid <PIC> suffix, "
+        "or is too vague. Do not turn a concrete draft into a refusal such as 'the reference does not include this'. "
+        "Return only the final ret text, with no Markdown and no explanation."
+    )
+    user_prompt = f"""Question:
+{question}
+
+Evidence:
+{format_evidence(question, evidence)[:2800]}
+
+Draft answer:
+{ret}
+
+Checklist:
+1. Directly answer every sub-question.
+2. Keep concrete handling steps, required proof, fees/timing caveats, or manual operations when supported.
+3. Do not invent exact prices, deadlines, promises, or image ids.
+4. Do not answer with "no relevant information" when the draft already provides a reasonable procedure.
+5. {image_rule}
+6. Chinese: 120-350 characters when possible. English: 80-220 words.
+"""
+    revised = thread_chat_client().complete(system_prompt, user_prompt, temperature=0.05, max_tokens=520)
+    revised = clean_submission_text(revised or ret)
+    if is_uncertain_answer(revised) and not is_uncertain_answer(ret):
+        return clean_submission_text(ret)
+    return revised
+
+
 def generate_answer(
     index: int,
     total: int,
@@ -320,11 +694,21 @@ def generate_answer(
     rankings: dict[str, list[dict[str, str]]],
     max_evidence: int,
     use_llm: bool,
+    use_self_check: bool,
+    visual_index: list[dict[str, Any]],
+    visual_second_stage: bool,
 ) -> tuple[dict[str, str], str]:
     qid = submission_id(question_row.get("question_id", ""))
     question = clean_text(question_row.get("question"))
     ranking_key = clean_text(question_row.get("question_id"))
-    evidence, images = select_evidence(question, rankings.get(ranking_key, []), nodes_by_id, max_evidence)
+    evidence, images = select_evidence(
+        question,
+        rankings.get(ranking_key, []),
+        nodes_by_id,
+        max_evidence,
+        visual_index=visual_index,
+        visual_second_stage=visual_second_stage,
+    )
     try:
         if use_llm:
             system_prompt, user_prompt = build_prompt(question, evidence, images)
@@ -348,7 +732,18 @@ def generate_answer(
         )
 
     ret = clean_submission_text(ret)
-    if images and not is_service_question(question) and "<PIC>" not in ret:
+    if use_llm and use_self_check:
+        draft_ret = ret
+        try:
+            ret = self_check_answer(question, evidence, images, ret)
+        except Exception as exc:
+            safe_print(f"[{index}/{total}] id={qid} self-check skipped: {exc}")
+            ret = draft_ret
+        if is_uncertain_answer(ret) and not is_uncertain_answer(draft_ret):
+            ret = draft_ret
+    if is_service_question(question):
+        ret = clean_submission_text(strip_pic_suffix(ret))
+    if images and is_manual_visual_question(question) and "<PIC>" not in ret:
         ret = clean_submission_text(f"{ret} <PIC> ;{json.dumps(images, ensure_ascii=False)}")
     return {"id": qid, "ret": ret}, f"[{index}/{total}] id={qid}: {preview(ret, 100)}"
 
@@ -358,6 +753,7 @@ def main() -> None:
     parser.add_argument("--questions", default=DEFAULT_QUESTIONS)
     parser.add_argument("--nodes", default=DEFAULT_NODES)
     parser.add_argument("--rankings", default=DEFAULT_RANKINGS)
+    parser.add_argument("--visual-index", default=DEFAULT_VISUAL_INDEX)
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
     parser.add_argument("--cache", default=DEFAULT_CACHE)
     parser.add_argument("--limit", type=int, default=None)
@@ -366,6 +762,8 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=1, help="Number of concurrent LLM calls.")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--no-llm", action="store_true")
+    parser.add_argument("--skip-self-check", action="store_true")
+    parser.add_argument("--skip-visual-second-stage", action="store_true")
     args = parser.parse_args()
 
     questions = [row for row in read_csv(args.questions) if clean_text(row.get("question"))]
@@ -376,6 +774,7 @@ def main() -> None:
         questions = questions[: args.limit]
     nodes_by_id = {clean_text(node.get("node_id")): node for node in read_jsonl(args.nodes) if clean_text(node.get("node_id"))}
     rankings = load_rankings(args.rankings)
+    visual_index = load_visual_index(args.visual_index)
     output = resolve_path(args.output)
     cache_path = resolve_path(args.cache)
     cached = load_cache(cache_path) if args.resume else {}
@@ -390,7 +789,7 @@ def main() -> None:
 
     if rows:
         write_submission(output, rows)
-        print(f"Loaded {len(rows)} cached rows. Pending {len(pending)} rows.")
+        safe_print(f"Loaded {len(rows)} cached rows. Pending {len(pending)} rows.")
 
     use_llm = not args.no_llm
     workers = max(1, args.workers)
@@ -404,12 +803,15 @@ def main() -> None:
                 rankings,
                 args.max_evidence,
                 use_llm,
+                not args.skip_self_check,
+                visual_index,
+                not args.skip_visual_second_stage,
             )
             rows.append(row)
             append_cache(cache_path, row["id"], row["ret"])
             if len(rows) % 5 == 0 or len(rows) == 1:
                 write_submission(output, rows)
-            print(message, flush=True)
+            safe_print(message)
             time.sleep(0.05)
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -423,6 +825,9 @@ def main() -> None:
                     rankings,
                     args.max_evidence,
                     use_llm,
+                    not args.skip_self_check,
+                    visual_index,
+                    not args.skip_visual_second_stage,
                 )
                 for index, question_row in pending
             ]
@@ -432,12 +837,12 @@ def main() -> None:
                 append_cache(cache_path, row["id"], row["ret"])
                 if len(rows) % 5 == 0 or done == len(futures):
                     write_submission(output, rows)
-                print(message, flush=True)
+                safe_print(message)
 
     write_submission(output, rows)
-    print(f"Wrote {len(rows)} rows to {output}")
+    safe_print(f"Wrote {len(rows)} rows to {output}")
     if rows:
-        print(json.dumps(rows[0], ensure_ascii=False))
+        safe_print(json.dumps(rows[0], ensure_ascii=False))
 
 
 if __name__ == "__main__":
