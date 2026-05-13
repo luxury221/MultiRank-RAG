@@ -1,228 +1,159 @@
-# 多模态 RAG 证据链系统
+# MultiRank-RAG
 
-这是一个面向复杂 PDF 和图文混合资料的多模态 RAG 项目。系统会把 PDF 解析成文本、表格、图片、图注、标题等证据节点，结合视觉理解、图文 embedding、BM25、知识图谱和图结构重排序，返回可追溯的证据链和最终回答。
+面向复杂 PDF、产品手册和图文混合知识库的 **多模态 GraphRAG 证据链问答系统**。项目将文档解析、视觉理解、图文向量化、知识图谱、多路召回、分层重排和答案生成整合为一条可落地的工程链路，重点解决“答案是否有依据、图片是否真正支撑回答、证据之间如何关联”的问题。
 
-项目重点不是只生成一段答案，而是完整保留“答案从哪里来、证据之间如何关联、图片是否真的支持回答”的链路。
+系统不是简单地把文档切片后交给 LLM，而是将文本、表格、图片、图注、版面位置、章节结构和实体关系统一建模为可追溯证据节点，并通过多模态检索与图结构增强完成高可信问答。
 
-## 核心能力
+## Highlights
 
-- **PDF 解析**：默认使用 MinerU 解析 PDF，保留文本、表格、图片、公式、bbox、图注和页面结构。
-- **视觉理解**：对图片和表格裁剪图调用 Qwen-VL 或豆包视觉模型，生成 `visual_caption`、`key_objects`、`ocr_text`、`qa_evidence` 等结构化字段。
-- **图文 embedding**：使用 `doubao-embedding-vision-250615` 时，视觉节点会把“裁剪图 + 文本上下文 + 视觉识别结果”一起编码。
-- **多路召回**：默认 `fusion`，融合 lexical、BM25、embedding、商品/实体匹配、KG、section、reference、visual、layout 等路线。
-- **GraphRAG-lite**：从节点中抽取产品、部件、动作、故障、政策、图片实体和关系，构建轻量知识图谱。
-- **G4 重排序**：融合语义相似度、PPR、跨模态 bridge、引用、视觉 grounding、证据链连贯性、领域意图、商品匹配和 KG 信号。
-- **证据链与答案生成**：先组织证据链，再由 LLM 基于证据生成答案；图片类问题会做二阶段视觉重排，答案生成后可进行 self-check。
-- **前端展示**：FastAPI 后端和 Web 前端支持上传 PDF、查看检索结果、证据链、裁剪图和证据卡片。
+- **多模态文档解析**：基于 MinerU 解析 PDF，保留文本、标题、表格、图片、公式、图注、bbox、页码和章节层级。
+- **图文协同理解**：使用 Qwen-VL / 豆包视觉模型生成图片语义、OCR、关键对象和问答证据，再通过 `doubao-embedding-vision` 进行图文联合向量化。
+- **GraphRAG 证据建模**：构建文档证据图和轻量知识图谱，覆盖产品、部件、动作、故障、政策、图片等实体关系。
+- **多路融合召回**：融合 BM25、lexical、embedding、visual、layout、section、reference、product、KG 等检索信号。
+- **MultiRank 分层重排**：在语义相似度基础上叠加 PPR 图传播、跨模态 bridge、视觉 grounding、显式引用和证据链完整度。
+- **证据链驱动生成**：先组织可追溯证据链，再进行答案生成、图片证据回传和输出校验。
+- **工程化落地**：提供脚本流水线、FastAPI 服务、Web 可视化界面、缓存机制和可复现实验产物。
 
-## 项目结构
-
-```text
-backend/   API 服务与异步任务编排
-web/       前端展示与可视化
-scripts/   解析、视觉增强、召回、重排、证据链、导出
-configs/   环境变量模板
-data/      输入样例与问题集
-outputs/   中间产物与结果文件
-```
-
-## 系统流程
+## Architecture
 
 ```text
 PDF / 图文资料
-  |
-  v
-MinerU 解析
-  -> page 节点
-  -> text 节点
-  -> table 节点
-  -> figure 节点
-  -> caption 节点
-  -> title / equation 节点
-  |
-  v
-视觉 grounding
-  -> 页面截图
-  -> bbox 定位
-  -> 局部裁剪图
-  -> Qwen-VL / 豆包视觉 caption
-  |
-  v
-节点增强
-  -> visual_title
-  -> key_objects
-  -> ocr_text
-  -> data_or_trends
-  -> qa_evidence
-  -> visual_summary
-  |
-  v
-索引构建
-  -> embedding index
-  -> text index
-  -> visual index
-  -> KG entities / relations
-  |
-  v
-问题路由
-  -> policy / manual / troubleshooting / visual / text_fact
-  |
-  v
-多路召回 fusion
-  -> lexical
-  -> BM25
-  -> embedding-vision
-  -> product/entity
-  -> KG
-  -> section
-  -> reference
-  -> visual
-  -> layout
-  |
-  v
-G0-G4 重排序
-  -> G0 原始召回
-  -> G1 相似度
-  -> G2 相似度 + PPR
-  -> G3 相似度 + PPR + Bridge + 引用
-  -> G4 G3 + 视觉 + 证据链 + 领域 + 商品 + KG
-  |
-  v
-证据链生成
-  -> 主证据
-  -> 上下文证据
-  -> 图表证据
-  -> 图注证据
-  -> KG/邻居补充证据
-  |
-  v
-答案生成
-  -> 证据格式化
-  -> 图片二阶段重排
-  -> LLM 生成
-  -> self-check
-  |
-  v
-证据卡片 / Web 展示 / CSV 导出
+   |
+   v
+MinerU Parser
+   |-- text / table / figure / caption / title / equation
+   |-- bbox / page / section / source_ref
+   v
+Evidence Node Builder
+   |-- 统一节点 schema
+   |-- chunk context
+   |-- explicit refs
+   v
+Visual Grounding
+   |-- page rendering
+   |-- crop extraction
+   |-- Qwen-VL / Doubao vision caption
+   |-- OCR / key objects / QA evidence
+   v
+Index Layer
+   |-- text embedding
+   |-- multimodal embedding
+   |-- BM25 / lexical index
+   |-- visual index
+   v
+GraphRAG Layer
+   |-- evidence graph
+   |-- entity graph
+   |-- product / part / action / fault / policy / image relations
+   v
+Hybrid Retrieval
+   |-- BM25
+   |-- embedding
+   |-- visual
+   |-- layout
+   |-- section / reference
+   |-- product / KG
+   v
+MultiRank Reranking
+   |-- semantic similarity
+   |-- PPR
+   |-- bridge score
+   |-- visual grounding
+   |-- evidence chain
+   |-- domain / product / KG signals
+   v
+Evidence Chain + Answer Generation
+   |-- grounded prompt
+   |-- self-check
+   |-- PIC evidence suffix
+   |-- API / UI / CSV export
 ```
 
-## 数据解析流程
+## Core Pipeline
 
-解析入口是 `scripts/01_parse_pdf.py`。
+### 1. 文档解析与证据节点构建
 
-默认流程：
+入口：`scripts/01_parse_pdf.py`
 
-1. 读取 `data/pdfs/` 中的 PDF。
-2. 调用 MinerU 解析页面结构、文本、图片、表格、公式和 bbox。
-3. 将 MinerU 输出转换为统一 evidence node。
-4. 按 chunk 模板切分长文本，并保留章节、前后文和显式图表引用。
-5. 写入 `outputs/parsed/nodes.jsonl`。
+系统读取 PDF 后调用 MinerU 解析页面结构，将原始文档转换为统一的 evidence node。每个节点保留来源、页码、章节、上下文、bbox、图表引用和视觉字段，后续检索、重排、证据链生成都围绕该节点 schema 展开。
 
-统一节点类型：
+主要节点类型：
 
 ```text
 page      页面节点
-title     标题/章节节点
+title     标题 / 章节节点
 text      正文 chunk
 table     表格节点
-figure    图片/图示节点
-caption   图注/表注节点
+figure    图片 / 图示节点
+caption   图注 / 表注节点
 equation  公式节点
 ```
 
-常见字段：
+关键字段：
 
 ```text
 node_id, doc_id, page, node_type, content, source_ref,
-section, section_id, parent_chunk_id,
-previous_node_id, next_node_id,
-previous_chunk_preview, next_chunk_preview,
-explicit_refs, nearby_caption_refs,
-bbox, bbox_source, page_width, page_height,
-crop_image_path, page_image_path,
+section, parent_chunk_id, previous_node_id, next_node_id,
+bbox, crop_image_path, page_image_path,
 visual_caption, key_objects, ocr_text, qa_evidence, visual_summary
 ```
 
-## 图片解析与视觉理解
+### 2. 视觉证据增强
 
-视觉证据构建入口是 `scripts/10_build_visual_evidence.py`。
+入口：`scripts/10_build_visual_evidence.py`
 
-系统会先渲染 PDF 页面，再为 text/table/figure/caption 节点生成裁剪图：
+视觉链路会先渲染 PDF 页面，再根据 bbox 生成局部裁剪图。对图片、表格和图示节点，系统调用视觉模型生成结构化语义字段，使图片不再只是文件路径，而是可以参与检索、重排和答案生成的证据。
 
-```text
-outputs/visual/pages/
-outputs/visual/crops/
-```
-
-裁剪定位优先使用 MinerU 或 layout parser 给出的 bbox。如果没有可靠 bbox，则回退到文本块匹配、图注邻近图片、表格邻近文本区域或页面投影区域。
-
-图片识别分成两层：
-
-- **Qwen-VL / 豆包视觉模型**：负责理解图片内容，输出结构化文本证据。
-- **doubao-embedding-vision**：负责把图片和文本一起编码成向量，用于召回和重排序。
-
-推荐顺序是：
+推荐链路：
 
 ```text
-裁剪图 -> Qwen-VL 生成视觉证据 -> doubao-embedding-vision 编码图文联合表示
+page image / crop image
+   -> Qwen-VL / Doubao vision
+   -> visual_caption / OCR / key_objects / qa_evidence
+   -> doubao-embedding-vision multimodal embedding
 ```
 
-这样图片节点既有可读的结构化语义，又保留真实图像信息参与向量检索。
+视觉模型负责“理解图片内容”，`doubao-embedding-vision` 负责“把图片和文本编码到统一向量空间”。两者分工明确，可以同时启用。
 
-## Embedding 与索引
+### 3. 图文索引与多路召回
 
-Embedding 实现在 `scripts/embedding_index.py`。
+入口：`scripts/03_retrieve_candidates.py`  
+核心实现：`scripts/embedding_index.py`、`scripts/rerank_lib.py`
 
-模型读取顺序：
+系统默认使用 `fusion` 召回策略，将语义向量、关键词、视觉语义、版面结构、章节引用和图谱关系合并为候选池。
+
+支持的召回路线：
 
 ```text
-RAG_EMBEDDING_MODEL
-ARK_EMBEDDING_MODEL
-BAAI/bge-m3
+bm25        关键词与短语匹配
+lexical     字符级 / 词级相似度
+embedding   文本语义向量召回
+visual      caption / OCR / crop grounding
+layout      bbox / 页面位置 / 图表区域
+section     章节结构召回
+reference   显式图表引用召回
+product     产品名、型号、别名匹配
+kg          实体关系召回
+fusion      多路融合召回
 ```
 
-推荐配置：
+问题会先做意图路由，例如 policy、manual、manual_visual、troubleshooting、visual、text_fact。不同问题类型使用不同权重，避免图片证据干扰政策类问题，也避免纯文本检索漏掉操作图示。
 
-```text
-RAG_EMBEDDING_PROVIDER=ark
-RAG_EMBEDDING_MODEL=doubao-embedding-vision-250615
-ARK_EMBEDDING_DIMENSIONS=1024
-```
+### 4. GraphRAG 知识增强
 
-普通文本节点使用文本 embedding。视觉节点如果存在 `crop_image_path`，Ark 模式下会调用多模态 embedding 接口，将图片和节点文本一起编码。
+入口：`scripts/23_build_kg.py`
 
-缓存输出：
-
-```text
-outputs/embeddings/*.npz
-outputs/embeddings/*_items.jsonl
-```
-
-当前项目使用本地 `.npz` 向量矩阵和内存检索，没有强依赖 Milvus、Qdrant、Chroma 或 FAISS。后续数据规模变大时，可以替换 `EmbeddingIndex` 为独立向量数据库。
-
-## GraphRAG-lite 知识图谱
-
-知识图谱构建入口是 `scripts/23_build_kg.py`。
-
-输出目录：
-
-```text
-outputs/kg/entities.jsonl
-outputs/kg/relations.jsonl
-outputs/kg/product_profiles.jsonl
-outputs/text_index/nodes.jsonl
-outputs/visual_index/images.jsonl
-```
+系统从 evidence node 中抽取实体与关系，构建轻量知识图谱，并将图谱信号注入召回和重排阶段。
 
 实体类型：
 
 ```text
-product  产品/文档对象
-part     部件
-action   操作动作
-fault    故障现象
-policy   规则/政策/服务意图
-image    图片
+product   产品 / 文档对象
+part      部件
+action    操作动作
+fault     故障现象
+policy    规则 / 售后 / 服务意图
+image     图片证据
 ```
 
 关系类型：
@@ -239,186 +170,131 @@ image_depicts_part
 policy_applies_to_product
 ```
 
-KG 的作用不是替代向量检索，而是作为额外结构信号：
+KG 不替代向量检索，而是作为结构化约束信号，解决“语义相近但产品不对”“答案流畅但证据不支撑”“图片和动作不匹配”等问题。
 
-- 政策类问题优先定位对应规则节点。
-- 部件/操作类问题利用“产品-部件-动作”关系增强召回。
-- 故障类问题利用“故障-处理动作-相关部件”关系增强排序。
-- 图片类问题利用“图片-部件/动作”关系辅助选择视觉证据。
+### 5. MultiRank 分层重排
 
-为了避免噪声，泛化动作词如“使用/use”不会单独驱动 KG；必须和具体产品、部件、故障或政策共同出现。
+入口：`scripts/04_rerank.py`  
+核心实现：`scripts/rerank_lib.py`
 
-## 候选召回
-
-候选召回入口是 `scripts/03_retrieve_candidates.py`，核心逻辑在 `rerank_lib.retrieve_candidates`。
-
-支持的 retriever：
-
-```text
-fusion
-lexical
-bm25
-embedding
-hybrid
-kg
-```
-
-默认使用 `fusion`。Fusion 会先做问题路由，再动态融合多条召回路线。
-
-问题路由类型：
-
-```text
-policy
-manual
-manual_visual
-troubleshooting
-visual
-text_fact
-general
-```
-
-召回路线：
-
-- `lexical`：字符级 TF-IDF，适合中文短语、术语和编号匹配。
-- `bm25`：适合短关键词、型号、部件、政策词和动作词。
-- `embedding`：语义向量召回，适合字面不同但语义接近的问题。
-- `hybrid`：embedding 与 lexical 加权。
-- `product`：商品名、文档对象和别名匹配。
-- `kg`：知识图谱实体与关系召回。
-- `section`：章节、结构块、chunk 策略召回。
-- `reference`：显式图表编号召回。
-- `visual`：视觉 caption、OCR、bbox、layout role 召回。
-- `layout`：位置类问题和有 bbox/crop 的节点召回。
-
-不同问题会使用不同权重。例如：
-
-- 规则/政策问题提高 BM25、section、KG-policy，降低视觉干扰。
-- 手册操作问题提高 product、section、visual、embedding。
-- 故障排查问题提高 product、KG-fault/action 和上下文。
-- 图片/表格/位置问题提高 visual、layout、reference。
-- 纯文本事实题降低 visual 和 layout。
-
-## 证据图
-
-证据图构建入口是 `scripts/02_build_graph.py`。
-
-节点来自解析阶段的 evidence nodes。边类型包括：
-
-```text
-belongs_to_page
-same_page
-section_title
-same_section
-parent_section
-chunk_sequence
-table_caption
-figure_caption
-text_ref_table
-text_ref_figure
-related
-```
-
-证据图用于：
-
-- PPR 图传播。
-- 跨模态 bridge。
-- 图表和图注补证。
-- 同页/同章节上下文补证。
-- 证据链组织。
-
-## G0-G4 重排序
-
-重排序核心位于 `scripts/rerank_lib.py`。
+重排阶段采用 G0-G4 分层策略：
 
 ```text
 G0 = 原始召回顺序
-G1 = Sim(q, node)
-G2 = alpha * Sim + beta * PPR
-G3 = λs * Sim + λp * PPR + λb * Bridge + λr * Reference
-G4 = G3 + Visual + Chain + Domain + Product + KG
+G1 = semantic similarity
+G2 = similarity + PPR
+G3 = similarity + PPR + bridge + reference
+G4 = G3 + visual + evidence chain + domain + product + KG
 ```
 
-G4 信号说明：
+G4 会融合以下信号：
 
-- `visual_score`：图片、表格、图注、caption、OCR、裁剪图与问题的匹配程度。
-- `chain_score`：候选证据是否能通过图关系连接到补充证据。
-- `domain_score`：面向业务场景的问题意图和节点结构匹配。
-- `product_score`：产品名、别名、文档对象匹配。
-- `kg_score`：实体和关系图谱匹配。
+- `sim_score`：问题与节点的语义相似度
+- `ppr_score`：证据图上的 PageRank 传播分数
+- `bridge_score`：跨模态或跨节点桥接能力
+- `ref_score`：显式图表引用匹配
+- `visual_score`：图片、OCR、caption、bbox 与问题的匹配程度
+- `chain_score`：候选节点与上下文证据的连贯性
+- `domain_score`：问题意图与节点领域的匹配
+- `product_score`：产品、型号、对象一致性
+- `kg_score`：实体与关系图谱信号
 
-G4 的目标是让最终证据既语义相关，又结构合理，还能解释为什么选中这段文本或这张图片。
+### 6. 证据链与答案生成
 
-## 证据链生成
+入口：`scripts/09_build_evidence_chains.py`、`scripts/21_generate_answer.py`
 
-证据链构建入口是 `scripts/09_build_evidence_chains.py`。
+答案生成前会先组织 evidence chain，包括主证据、同页/同章节上下文、图注、表格、图片和 KG 补充证据。LLM 只基于证据回答，图片类问题会保留 `<PIC> ;["image_id"]` 格式，便于外部系统定位图片来源。
 
-系统不是简单展示 Top-K，而是把证据组织成角色链：
+后处理模块包含：
+
+- 图片后缀规范化
+- 低置信答案识别
+- 截断检测
+- 候选答案裁决
+- 保守回退
+- 高风险答案精修
+
+## Repository Layout
 
 ```text
-main_evidence
-explicit_reference
-table_or_figure
-caption
-context_text
-graph_neighbor
-visual_companion
+backend/      FastAPI 服务与异步任务编排
+web/          React + Vite 前端可视化
+scripts/      解析、索引、召回、重排、证据链、答案生成脚本
+configs/      环境变量模板与 chunk 模板
+data/         输入 PDF、问题集和样例数据
+outputs/      解析产物、索引、图谱、证据链和导出结果
+docs/         项目文档与辅助说明
+demo/         演示资源
 ```
 
-构建逻辑：
+## Quick Start
 
-1. 选择 G4 Top-1 作为主证据。
-2. 如果问题包含图表编号，补充显式引用证据。
-3. 如果问题需要视觉信息，补充 table/figure/caption 节点。
-4. 沿证据图查找相邻上下文和跨模态节点。
-5. 如果视觉问题缺少视觉节点，尝试查找同页或图邻居视觉证据。
-6. 默认最多保留 `max_steps=5` 步。
+### 1. 安装依赖
 
-输出：
+```bash
+pip install -r requirements.txt
+```
+
+如需启用前端：
+
+```bash
+cd web
+npm install
+```
+
+### 2. 配置环境变量
+
+可以参考：
 
 ```text
-outputs/evidence_chains/chains.jsonl
-outputs/evidence_chains/chain_steps.csv
-outputs/evidence_chains/evidence_chains.md
+configs/doubao_optimized.env.example
 ```
 
-## 答案生成与 self-check
+核心配置项：
 
-答案生成使用证据链而不是只看 Top-1。文本模型读取顺序：
+```bash
+RAG_PDF_PARSER=mineru
 
-```text
-RAG_ANSWER_MODEL
-ARK_TEXT_MODEL_PRO
-ARK_TEXT_MODEL
-ARK_MODEL
+RAG_VISUAL_CAPTION_PROVIDER=qwen
+RAG_QWEN_VL_MODEL=qwen-vl-plus
+RAG_QWEN_API_KEY_ENV=DASHSCOPE_API_KEY
+
+RAG_EMBEDDING_PROVIDER=ark
+RAG_EMBEDDING_MODEL=doubao-embedding-vision-250615
+ARK_EMBEDDING_DIMENSIONS=1024
+
+RAG_ANSWER_PROVIDER=ark
+RAG_ANSWER_MODEL=<your-ark-endpoint-id>
+
+RAG_BACKEND_CANDIDATE_RETRIEVER=fusion
+RAG_BACKEND_RERANK_RETRIEVER=fusion
+RAG_BACKEND_ENABLE_KG=1
 ```
 
-答案生成流程：
+### 3. 运行完整离线流水线
 
-```text
-G4 rows
-  -> 证据筛选
-  -> 证据链格式化
-  -> 图片二阶段重排
-  -> LLM 生成答案
-  -> self-check
-  -> 清理非法图片后缀和过长文本
+```bash
+python scripts/06_run_pipeline.py \
+  --questions data/questions.csv \
+  --candidate-k 50 \
+  --rerank-k 10
 ```
 
-图片二阶段重排会重新检查候选图片是否真的回答问题，只保留最有用的 1-3 张图。规则类、政策类、纯文本类问题不会强行追加图片。
+常用跳过参数：
 
-self-check 会检查：
+```bash
+--skip-parse     # 跳过 PDF 解析
+--skip-visual    # 跳过视觉增强
+--skip-kg        # 跳过知识图谱构建
+```
 
-- 是否回答了所有子问题。
-- 是否编造了证据里没有的价格、时限或承诺。
-- 是否误加了 `<PIC>`。
-- 是否缺少必要的处理步骤、凭证要求或条件说明。
-- 答案是否过长、过泛或不够直接。
+### 4. 启动后端服务
 
-## 后端与前端
+```bash
+python -m uvicorn backend.app:app --host 127.0.0.1 --port 8765
+```
 
-后端位于 `backend/app.py`，使用 FastAPI。
-
-接口：
+API：
 
 ```text
 GET  /api/health
@@ -427,223 +303,80 @@ GET  /api/jobs/{job_id}
 GET  /api/jobs/{job_id}/files/{path}
 ```
 
-上传 PDF 后，后端会创建异步 job，输出到：
-
-```text
-outputs/upload_jobs/{job_id}/
-```
-
-每个 job 包含：
-
-```text
-pdfs/
-nodes.raw.jsonl
-nodes.jsonl
-edges.jsonl
-kg/
-text_index/
-visual_index/
-candidates.csv
-reranked.csv
-chain_steps.csv
-evidence_card.png
-result.json
-status.json
-```
-
-后端任务顺序：
-
-```text
-parse
-  -> visual crops + caption
-  -> graph
-  -> KG/text/visual index
-  -> retrieve
-  -> rerank
-  -> evidence chain
-  -> answer
-  -> evidence card
-```
-
-前端位于 `web/`，用于上传 PDF、查看处理进度、证据卡片、证据链和排序结果。
-
-## 内置样例知识库
-
-仓库内置了一套售后样例知识库，默认落在 `outputs/after_sales_kb/`。它用于验证从 PDF 解析、视觉增强、知识图谱、召回、重排到答案导出的整条链路。
-
-常用命令：
-
-```bash
-python scripts/22_enrich_images.py --nodes outputs/after_sales_kb/nodes.jsonl
-python scripts/23_build_kg.py \
-  --nodes outputs/after_sales_kb/nodes.jsonl \
-  --kg-dir outputs/kg \
-  --text-dir outputs/text_index \
-  --visual-dir outputs/visual_index
-python scripts/21_generate_answer.py \
-  --questions outputs/after_sales_kb/questions.csv \
-  --nodes outputs/after_sales_kb/nodes.jsonl \
-  --rankings outputs/after_sales_kb/reranked.csv \
-  --visual-index outputs/visual_index/images.jsonl \
-  --output outputs/after_sales_kb/full_test_no_llm.csv \
-  --cache outputs/after_sales_kb/full_test_no_llm_cache.jsonl \
-  --no-llm
-```
-
-`22_enrich_images.py` 会调用 Qwen-VL 刷新图片说明；如果只验证已有产物或没有视觉模型密钥，可以跳过。
-
-`--no-llm` 用于不依赖外部文本模型的链路验证；正式生成答案时去掉该参数，并配置 `RAG_ANSWER_MODEL`。
-
-## 运行方式
-
-安装 Python 依赖：
-
-```bash
-pip install -r requirements.txt
-```
-
-安装前端依赖：
-
-```bash
-cd web
-npm install
-```
-
-推荐环境变量：
-
-```powershell
-[Environment]::SetEnvironmentVariable('ARK_API_KEY','你的 Ark API Key','User')
-[Environment]::SetEnvironmentVariable('ARK_BASE_URL','https://ark.cn-beijing.volces.com/api/v3','User')
-[Environment]::SetEnvironmentVariable('RAG_EMBEDDING_PROVIDER','ark','User')
-[Environment]::SetEnvironmentVariable('RAG_EMBEDDING_MODEL','doubao-embedding-vision-250615','User')
-[Environment]::SetEnvironmentVariable('ARK_EMBEDDING_DIMENSIONS','1024','User')
-[Environment]::SetEnvironmentVariable('RAG_VISUAL_CAPTION_PROVIDER','qwen','User')
-[Environment]::SetEnvironmentVariable('RAG_QWEN_VL_MODEL','qwen-vl-plus','User')
-[Environment]::SetEnvironmentVariable('RAG_QWEN_API_KEY_ENV','DASHSCOPE_API_KEY','User')
-[Environment]::SetEnvironmentVariable('RAG_ANSWER_PROVIDER','ark','User')
-[Environment]::SetEnvironmentVariable('RAG_ANSWER_MODEL','你的文本模型 endpoint id','User')
-```
-
-仓库提供配置模板：
-
-```text
-configs/doubao_optimized.env.example
-```
-
-启动后端：
-
-```bash
-python -m uvicorn backend.app:app --host 127.0.0.1 --port 8765
-```
-
-启动前端：
+### 5. 启动前端
 
 ```bash
 cd web
 npm run dev
 ```
 
-访问：
+前端默认连接：
 
 ```text
-http://127.0.0.1:5173/
+http://127.0.0.1:8765
 ```
 
-## 离线流水线
+## Outputs
 
-核心流水线（到证据卡片）：
-
-```bash
-python scripts/06_run_pipeline.py \
-  --questions data/questions.csv \
-  --parser mineru \
-  --mineru-backend pipeline \
-  --mineru-method auto \
-  --visual-caption-provider qwen \
-  --candidate-retriever fusion \
-  --rerank-retriever fusion \
-  --embedding-model doubao-embedding-vision-250615 \
-  --embedding-device auto
-```
-
-单步运行：
-
-```bash
-python scripts/01_parse_pdf.py
-python scripts/14_chunk_quality_report.py --nodes outputs/parsed/nodes.jsonl
-python scripts/15_visualize_layout_bboxes.py --nodes outputs/parsed/nodes.jsonl --max-pages-per-doc 4
-python scripts/10_build_visual_evidence.py
-python scripts/22_enrich_images.py --nodes outputs/parsed/nodes.jsonl
-python scripts/02_build_graph.py
-python scripts/23_build_kg.py --nodes outputs/parsed/nodes.jsonl
-python scripts/03_retrieve_candidates.py --retriever fusion
-python scripts/04_rerank.py --retriever fusion
-python scripts/09_build_evidence_chains.py
-python scripts/11_build_evidence_cards.py
-python scripts/12_check_evidence_cards.py
-python scripts/21_generate_answer.py \
-  --questions data/questions.csv \
-  --nodes outputs/parsed/nodes.jsonl \
-  --rankings outputs/rankings/reranked.csv \
-  --visual-index outputs/visual_index/images.jsonl \
-  --output outputs/answers.csv \
-  --cache outputs/answers_cache.jsonl
-python scripts/13_export_frontend_data.py
-```
-
-快速消融诊断：
-
-```bash
-python scripts/24_ablate_retrieval.py \
-  --questions data/questions.csv \
-  --nodes outputs/parsed/nodes.jsonl \
-  --edges outputs/parsed/edges.jsonl \
-  --kg-dir outputs/kg \
-  --output-dir outputs/ablation \
-  --top-k 10 \
-  --candidate-k 50
-```
-
-如果要把 embedding 路线也纳入消融：
-
-```bash
-python scripts/24_ablate_retrieval.py --include-embedding
-```
-
-## 验证记录
-
-仓库当前的内置样例目录已完成一次全量跑通：
-
-- `outputs/after_sales_kb/questions.csv`：400 条问题
-- `outputs/after_sales_kb/nodes.jsonl`：6707 条节点
-- `outputs/after_sales_kb/edges.jsonl`：34900 条边
-- `outputs/after_sales_kb/reranked.csv`：20000 条排序记录
-- `outputs/after_sales_kb/evidence_chains/chains.jsonl`：400 条证据链
-- `outputs/after_sales_kb/full_test_no_llm.csv`：400 条链路验证答案
-
-## 主要输出
+典型产物：
 
 ```text
-outputs/parsed/nodes.jsonl
-outputs/parsed/edges.jsonl
-outputs/visual/pages/
-outputs/visual/crops/
-outputs/kg/entities.jsonl
-outputs/kg/relations.jsonl
-outputs/text_index/nodes.jsonl
-outputs/visual_index/images.jsonl
-outputs/rankings/candidates.csv
-outputs/rankings/reranked.csv
-outputs/evidence_chains/
-outputs/evidence_cards/
-outputs/metrics/
+outputs/parsed/nodes.jsonl          统一证据节点
+outputs/parsed/edges.jsonl          文档证据图边
+outputs/visual/pages/               页面渲染图
+outputs/visual/crops/               局部裁剪图
+outputs/embeddings/                 embedding 缓存
+outputs/kg/entities.jsonl           知识图谱实体
+outputs/kg/relations.jsonl          知识图谱关系
+outputs/text_index/nodes.jsonl      文本索引
+outputs/visual_index/images.jsonl   视觉索引
+outputs/evidence_chains.jsonl       证据链
+outputs/evidence_cards.jsonl        前端证据卡片
 ```
 
-## 技术边界
+## Engineering Design
 
-- 当前向量索引是本地 `.npz` 缓存和内存矩阵检索，不是独立向量数据库。
-- KG 是轻量规则和结构字段抽取，不是完整数据库型知识图谱；它用于增强召回和重排，不替代原始证据。
-- PDF 表格结构主要依赖 MinerU 输出；复杂跨页表格和图片化表格仍可能需要额外校验。
-- 视觉 caption 质量依赖图片裁剪质量和 VLM 能力；裁剪区域错误会影响后续 embedding 和答案。
-- 如果配置 Ark embedding-vision，会真实调用图文 embedding API；未配置时会回退到本地 embedding 或非 API 召回路线。
-- 答案生成依赖证据链质量；如果解析、召回或图片识别错误，LLM 只能基于错误证据生成相对合理的回答。
+项目按“可替换、可观测、可回退”的方式组织：
+
+- **可替换解析器**：MinerU 为默认解析器，保留 native parser 回退能力。
+- **可替换模型层**：视觉 caption、embedding、答案生成均通过配置切换供应商。
+- **可复用节点 schema**：解析、视觉、图谱、检索和生成共享同一 evidence node。
+- **可解释重排**：每条候选结果保留 sim、PPR、bridge、visual、KG 等分项分数。
+- **可追溯输出**：答案可回溯到节点、页码、图片、caption 和关系图谱。
+- **可控生成**：通过 self-check、候选裁决、截断检测和保守回退降低生成风险。
+
+## Main Scripts
+
+```text
+01_parse_pdf.py                         PDF 解析与节点生成
+02_build_graph.py                       文档证据图构建
+03_retrieve_candidates.py               多路候选召回
+04_rerank.py                            G0-G4 分层重排
+06_run_pipeline.py                      全链路流水线
+09_build_evidence_chains.py             证据链生成
+10_build_visual_evidence.py             视觉裁剪与图片理解
+11_build_evidence_cards.py              前端证据卡片导出
+21_generate_answer.py                    答案生成与后处理
+23_build_kg.py                          知识图谱构建
+24_ablate_retrieval.py                  检索消融分析
+26_judge_submissions.py                 候选答案裁决
+29_refine_submission_answers.py         高风险答案精修
+embedding_index.py                      向量索引与缓存
+rerank_lib.py                           召回、路由、重排核心逻辑
+```
+
+## Tech Stack
+
+- Python, FastAPI, NetworkX, scikit-learn
+- PyMuPDF, pdfplumber, pypdf, MinerU
+- OpenAI-compatible API clients
+- Qwen-VL, Doubao Vision, Doubao Embedding Vision
+- React, Vite, Tailwind CSS, lucide-react
+
+## Roadmap
+
+- 接入独立向量数据库，如 Milvus、Qdrant、FAISS 或 Chroma
+- 将轻量 KG 存储迁移到图数据库，如 Neo4j 或 NebulaGraph
+- 增加跨文档多跳推理与答案级 citation
+- 增强表格结构理解与数值型问答能力
+- 引入在线评测面板，支持召回、重排、答案质量的持续监控
