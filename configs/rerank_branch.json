@@ -1,0 +1,7 @@
+{
+  "branch": "experiments/g0-original-recall",
+  "method": "G0",
+  "name": "Original candidate order baseline",
+  "description": "G0 keeps the original retrieval candidate order. It is the baseline branch used to compare later semantic, graph, bridge, visual and KG improvements.",
+  "run_example": "python scripts/04_rerank.py --methods G0 --retriever fusion --output outputs/rankings_g0.csv"
+}
