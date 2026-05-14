@@ -1,0 +1,7 @@
+{
+  "branch": "experiments/g2-graph-ppr",
+  "method": "G2",
+  "name": "Semantic plus graph propagation",
+  "description": "G2 adds graph propagation with PPR on top of semantic similarity. It tests whether document structure, page links, captions and neighboring evidence improve retrieval quality.",
+  "run_example": "python scripts/04_rerank.py --methods G2 --retriever fusion --output outputs/rankings_g2.csv"
+}
