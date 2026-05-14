@@ -1,0 +1,7 @@
+{
+  "branch": "experiments/g3-bridge-reference",
+  "method": "G3",
+  "name": "Graph bridge and explicit reference reranking",
+  "description": "G3 adds bridge evidence and explicit figure/table/reference matching on top of G2. It is used to test whether cross-node evidence chains improve precision.",
+  "run_example": "python scripts/04_rerank.py --methods G3 --retriever fusion --output outputs/rankings_g3.csv"
+}
