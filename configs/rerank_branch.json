@@ -1,0 +1,7 @@
+{
+  "branch": "experiments/g4-multirank",
+  "method": "G4",
+  "name": "Full MultiRank multimodal GraphRAG",
+  "description": "G4 is the full method branch. It combines G3 with visual grounding, evidence-chain coherence, after-sales domain signals, product routing and KG-lite signals.",
+  "run_example": "python scripts/04_rerank.py --methods G4 --retriever fusion --output outputs/rankings_g4.csv"
+}
