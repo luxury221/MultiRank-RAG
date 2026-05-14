@@ -1,0 +1,7 @@
+{
+  "branch": "experiments/g1-semantic",
+  "method": "G1",
+  "name": "Semantic similarity reranking",
+  "description": "G1 reranks candidates by semantic similarity between the question and evidence nodes. It isolates the embedding and text-semantic signal before graph or visual enhancements are added.",
+  "run_example": "python scripts/04_rerank.py --methods G1 --retriever fusion --output outputs/rankings_g1.csv"
+}
