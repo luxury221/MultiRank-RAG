@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from collections import Counter, defaultdict
 
 from embedding_index import (
@@ -24,6 +25,7 @@ from pipeline_common import (
 )
 from rerank_lib import rank_question
 from rerank_lib import load_kg_index
+from datafountain_query_expansion import expand_question, load_routes, submission_id
 
 
 RANKING_FIELDS = [
@@ -55,6 +57,19 @@ RANKING_FIELDS = [
     "content_preview",
     "rerank_time_ms",
 ]
+
+ALL_RERANK_METHODS = ("G0", "G1", "G2", "G3", "G4")
+
+
+def parse_methods(value: str) -> list[str]:
+    methods = [item.strip().upper() for item in value.split(",") if item.strip()]
+    invalid = [method for method in methods if method not in ALL_RERANK_METHODS]
+    if invalid:
+        raise argparse.ArgumentTypeError(
+            f"Unknown rerank method(s): {', '.join(invalid)}. "
+            f"Valid choices: {', '.join(ALL_RERANK_METHODS)}"
+        )
+    return list(dict.fromkeys(methods)) or list(ALL_RERANK_METHODS)
 
 
 def group_candidates(rows: list[dict[str, str]]) -> dict[str, list[dict[str, str]]]:
@@ -88,6 +103,14 @@ def main() -> None:
     parser.add_argument("--embedding-batch-size", type=int, default=DEFAULT_EMBEDDING_BATCH_SIZE)
     parser.add_argument("--hybrid-alpha", type=float, default=0.7, help="Embedding weight for --retriever hybrid.")
     parser.add_argument("--kg-dir", default="outputs/kg", help="KG-lite directory. Empty string disables KG scoring.")
+    parser.add_argument("--routes", default="", help="Optional DataFountain question route CSV for product-aware query expansion.")
+    parser.add_argument("--expand-query", action="store_true", help="Append product route aliases to reranking queries.")
+    parser.add_argument(
+        "--methods",
+        type=parse_methods,
+        default=parse_methods(os.getenv("RAG_RERANK_METHODS", ",".join(ALL_RERANK_METHODS))),
+        help="Comma-separated methods to write, e.g. G0 or G0,G4.",
+    )
     parser.add_argument("--resume", action="store_true", help="Reuse complete question rows already present in output.")
     args = parser.parse_args()
 
@@ -106,50 +129,61 @@ def main() -> None:
             batch_size=args.embedding_batch_size,
         )
     kg_index = load_kg_index(args.kg_dir)
+    routes = load_routes(args.routes) if args.expand_query and args.routes else {}
 
     rows: list[dict[str, object]] = []
     completed_qids: set[str] = set()
     if args.resume and resolve_path(args.output).exists():
         existing_rows = read_csv(args.output)
-        expected_rows_per_question = args.top_k * 5
-        counts = Counter(row.get("question_id", "") for row in existing_rows if row.get("question_id"))
+        selected_methods = set(args.methods)
+        expected_rows_per_question = args.top_k * len(selected_methods)
+        counts = Counter(
+            row.get("question_id", "")
+            for row in existing_rows
+            if row.get("question_id") and row.get("method") in selected_methods
+        )
         completed_qids = {qid for qid, count in counts.items() if count >= expected_rows_per_question}
-        rows = [row for row in existing_rows if row.get("question_id", "") in completed_qids]
+        rows = [
+            row
+            for row in existing_rows
+            if row.get("question_id", "") in completed_qids and row.get("method") in selected_methods
+        ]
         print(
             f"Resuming from {resolve_path(args.output)}; "
             f"kept {len(rows)} rows for {len(completed_qids)} complete questions.",
             flush=True,
         )
 
+    print(f"Writing rerank methods: {','.join(args.methods)}", flush=True)
     processed = 0
     for index, question in enumerate(questions, start=1):
         qid = question.get("question_id", "")
         if qid in completed_qids:
             continue
-        rows.extend(
-            rank_question(
-                question,
-                nodes,
-                edges,
-                top_k=args.top_k,
-                candidate_rows=candidates_by_qid.get(qid),
-                alpha=args.alpha,
-                beta=args.beta,
-                lambda_s=args.lambda_s,
-                lambda_p=args.lambda_p,
-                lambda_b=args.lambda_b,
-                lambda_r=args.lambda_r,
-                tau=args.tau,
-                retriever=args.retriever,
-                embedding_index=embedding_index,
-                embedding_model=args.embedding_model,
-                embedding_cache=args.embedding_cache,
-                embedding_device=args.embedding_device,
-                embedding_batch_size=args.embedding_batch_size,
-                hybrid_alpha=args.hybrid_alpha,
-                kg_index=kg_index,
-            )
+        query_question = expand_question(question, routes.get(submission_id(qid))) if routes else question
+        question_rows = rank_question(
+            query_question,
+            nodes,
+            edges,
+            top_k=args.top_k,
+            candidate_rows=candidates_by_qid.get(qid),
+            alpha=args.alpha,
+            beta=args.beta,
+            lambda_s=args.lambda_s,
+            lambda_p=args.lambda_p,
+            lambda_b=args.lambda_b,
+            lambda_r=args.lambda_r,
+            tau=args.tau,
+            retriever=args.retriever,
+            embedding_index=embedding_index,
+            embedding_model=args.embedding_model,
+            embedding_cache=args.embedding_cache,
+            embedding_device=args.embedding_device,
+            embedding_batch_size=args.embedding_batch_size,
+            hybrid_alpha=args.hybrid_alpha,
+            kg_index=kg_index,
         )
+        rows.extend(row for row in question_rows if row.get("method") in args.methods)
         processed += 1
         if processed == 1 or processed % 10 == 0 or index == len(questions):
             print(f"Reranked {index}/{len(questions)} questions; processed={processed}; rows={len(rows)}", flush=True)

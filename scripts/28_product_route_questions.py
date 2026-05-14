@@ -45,6 +45,14 @@ PRODUCT_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("toothbrush", ("电动牙刷", "electric toothbrush", "toothbrush")),
 )
 
+EXTRA_PRODUCT_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("coffee_machine", ("coffee machine", "coffee maker", "nespresso", "espresso", "lungo")),
+    ("boat", ("boat", "anchor light", "sail", "stern light", "navigation light")),
+    ("loudspeaker", ("loudspeaker", "speaker", "wireless speaker")),
+    ("gps_navigation", ("gps", "navigator", "navigation", "nav", "route guidance")),
+    ("robot_vacuum", ("vacuum", "robot vacuum", "roomba", "home base", "full bin sensor", "charging contacts")),
+)
+
 SERVICE_TERMS = (
     "售后",
     "退货",
@@ -88,7 +96,7 @@ def route_question(row: dict[str, str]) -> dict[str, Any]:
 
     scores: dict[str, float] = {}
     matched_aliases: dict[str, list[str]] = {}
-    for product, aliases in PRODUCT_ALIASES:
+    for product, aliases in (*PRODUCT_ALIASES, *EXTRA_PRODUCT_ALIASES):
         hits = [alias for alias in aliases if alias_in_text(alias, blob)]
         if not hits:
             continue

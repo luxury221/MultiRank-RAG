@@ -220,6 +220,14 @@ DATAFOUNTAIN_PRODUCT_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("电动牙刷", ("electric toothbrush", "toothbrush")),
 )
 
+DATAFOUNTAIN_EXTRA_PRODUCT_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("coffee_machine", ("coffee machine", "coffee maker", "nespresso", "espresso", "lungo")),
+    ("boat", ("boat", "anchor light", "sail", "stern light", "navigation light")),
+    ("loudspeaker", ("loudspeaker", "speaker", "wireless speaker")),
+    ("gps_navigation", ("gps", "navigator", "navigation", "nav", "route guidance")),
+    ("robot_vacuum", ("vacuum", "robot vacuum", "roomba", "home base", "full bin sensor", "charging contacts")),
+)
+
 SECTION_QUERY_HINTS = {
     "method": ("method", "methods", "methodology", "approach", "\u65b9\u6cd5"),
     "experiment": ("experiment", "experiments", "evaluation", "results", "\u5b9e\u9a8c", "\u7ed3\u679c", "\u8bc4\u4f30"),
@@ -1103,7 +1111,7 @@ def _alias_in_text(alias: str, text: str) -> bool:
 def matched_product_groups(question: dict[str, Any]) -> list[tuple[str, tuple[str, ...]]]:
     blob = f" {_question_blob(question)} "
     matches: list[tuple[str, tuple[str, ...]]] = []
-    for canonical, aliases in DATAFOUNTAIN_PRODUCT_ALIASES:
+    for canonical, aliases in (*DATAFOUNTAIN_PRODUCT_ALIASES, *DATAFOUNTAIN_EXTRA_PRODUCT_ALIASES):
         if _alias_in_text(canonical, blob) or any(_alias_in_text(alias, blob) for alias in aliases):
             matches.append((canonical, aliases))
     return matches

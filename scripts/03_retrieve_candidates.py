@@ -22,6 +22,7 @@ from pipeline_common import (
     write_csv,
 )
 from rerank_lib import load_kg_index, retrieve_candidates
+from datafountain_query_expansion import expand_question, load_routes, submission_id
 
 
 CANDIDATE_FIELDS = [
@@ -53,6 +54,8 @@ def main() -> None:
     parser.add_argument("--embedding-batch-size", type=int, default=DEFAULT_EMBEDDING_BATCH_SIZE)
     parser.add_argument("--hybrid-alpha", type=float, default=0.7, help="Embedding weight for --retriever hybrid.")
     parser.add_argument("--kg-dir", default="outputs/kg", help="KG-lite directory. Empty string disables KG scoring.")
+    parser.add_argument("--routes", default="", help="Optional DataFountain question route CSV for product-aware query expansion.")
+    parser.add_argument("--expand-query", action="store_true", help="Append product route aliases to retrieval queries.")
     parser.add_argument("--resume", action="store_true", help="Reuse complete question rows already present in output.")
     args = parser.parse_args()
 
@@ -69,6 +72,7 @@ def main() -> None:
             batch_size=args.embedding_batch_size,
         )
     kg_index = load_kg_index(args.kg_dir)
+    routes = load_routes(args.routes) if args.expand_query and args.routes else {}
 
     rows: list[dict[str, object]] = []
     completed_qids: set[str] = set()
@@ -88,8 +92,9 @@ def main() -> None:
         qid = question.get("question_id", "")
         if qid in completed_qids:
             continue
+        query_question = expand_question(question, routes.get(submission_id(qid))) if routes else question
         candidates, scores = retrieve_candidates(
-            question,
+            query_question,
             nodes,
             top_k=args.top_k,
             retriever=args.retriever,

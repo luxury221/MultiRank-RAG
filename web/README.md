@@ -1,7 +1,5 @@
 # 多模态 RAG 证据检测页面
 
-这个目录是从 Figma 页面改造来的 React/Vite 前端。页面读取 `public/app-data.json`，展示当前项目里的 PDF、问题、G4 证据链、检索结果和证据卡片。
-
 常用流程：
 
 ```bash

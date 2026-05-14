@@ -52,6 +52,65 @@ SERVICE_TERMS = (
     "complaint",
 )
 
+STRONG_SERVICE_TERMS = (
+    "\u9000\u8d27",
+    "\u6362\u8d27",
+    "\u9000\u6b3e",
+    "\u65e0\u7406\u7531",
+    "\u8fd0\u8d39",
+    "\u53d1\u7968",
+    "\u5f00\u7968",
+    "\u7269\u6d41",
+    "\u5feb\u9012",
+    "\u6295\u8bc9",
+    "\u552e\u540e",
+    "\u4fdd\u4fee",
+    "\u7ef4\u4fee",
+    "\u7834\u635f",
+    "\u6c61\u6e0d",
+    "\u62c6\u5c01",
+    "\u5c11\u53d1",
+    "\u9519\u53d1",
+    "\u8ba2\u5355",
+    "\u8865\u53d1",
+    "\u5047\u8d27",
+    "\u4e8c\u624b",
+    "\u8d54\u507f",
+    "\u8d28\u4fdd",
+    "return",
+    "refund",
+    "exchange",
+    "warranty",
+    "complaint",
+    "shipping",
+    "delivery",
+    "freight",
+    "invoice",
+    "order",
+)
+
+WEAK_SERVICE_TERMS = ("\u5305\u88c5", "repair")
+
+MANUAL_IMAGE_EXTRA_TERMS = (
+    "\u5305\u88c5\u76d2",
+    "\u914d\u4ef6",
+    "\u6e05\u5355",
+    "\u5305\u542b",
+    "\u5185\u5bb9\u7269",
+    "\u5b89\u5168",
+    "\u6ce8\u610f",
+    "\u8b66\u544a",
+    "included",
+    "package",
+    "box",
+    "accessory",
+    "safe",
+    "safety",
+    "warning",
+    "attention",
+    "finger",
+)
+
 MANUAL_IMAGE_TERMS = (
     "如何",
     "怎么",
@@ -126,6 +185,119 @@ UNCERTAIN_ANSWER_TERMS = (
     "currently provided reference",
 )
 
+QUESTION_STOP_TERMS = {
+    "\u8bf7\u95ee",
+    "\u5982\u4f55",
+    "\u600e\u4e48",
+    "\u4ec0\u4e48",
+    "\u54ea\u4e9b",
+    "\u53ef\u4ee5",
+    "\u9700\u8981",
+    "\u662f\u5426",
+    "\u5546\u54c1",
+    "\u4ea7\u54c1",
+    "\u6211\u7684",
+    "\u4f60\u4eec",
+    "\u4e00\u4e0b",
+    "\u8fd9\u4e2a",
+    "\u90a3\u4e2a",
+    "\u539f\u56e0",
+    "\u600e\u4e48\u529e",
+    "what",
+    "which",
+    "please",
+    "need",
+    "product",
+    "item",
+}
+
+ANSWER_PROFILE_TERMS = {
+    "shipping": (
+        "\u7269\u6d41",
+        "\u5feb\u9012",
+        "\u8fd0\u8d39",
+        "\u53d1\u8d27",
+        "\u63fd\u6536",
+        "\u7b7e\u6536",
+        "\u9001\u8fbe",
+        "\u4e61\u9547",
+        "shipping",
+        "delivery",
+        "freight",
+    ),
+    "invoice": ("\u53d1\u7968", "\u5f00\u7968", "\u7968\u636e", "invoice", "receipt"),
+    "return_refund": (
+        "\u9000\u8d27",
+        "\u6362\u8d27",
+        "\u9000\u6b3e",
+        "\u65e0\u7406\u7531",
+        "\u9000\u6362",
+        "return",
+        "refund",
+        "exchange",
+    ),
+    "warranty_repair": (
+        "\u4fdd\u4fee",
+        "\u7ef4\u4fee",
+        "\u8d28\u4fdd",
+        "\u6545\u969c",
+        "\u635f\u574f",
+        "warranty",
+        "repair",
+        "fault",
+        "broken",
+    ),
+    "operation": (
+        "\u4f7f\u7528",
+        "\u64cd\u4f5c",
+        "\u8bbe\u7f6e",
+        "\u5b89\u88c5",
+        "\u62c6\u5378",
+        "\u66f4\u6362",
+        "\u6e05\u6d01",
+        "\u8fde\u63a5",
+        "use",
+        "operate",
+        "set",
+        "install",
+        "replace",
+        "clean",
+        "connect",
+    ),
+    "visual_part": (
+        "\u6309\u94ae",
+        "\u6307\u793a\u706f",
+        "\u90e8\u4ef6",
+        "\u4f4d\u7f6e",
+        "\u5c3a\u5bf8",
+        "\u8868\u5e26",
+        "\u63a5\u53e3",
+        "\u5305\u88c5\u76d2",
+        "\u914d\u4ef6",
+        "\u6e05\u5355",
+        "button",
+        "indicator",
+        "led",
+        "part",
+        "position",
+        "size",
+        "strap",
+        "package",
+        "box",
+        "accessory",
+    ),
+}
+
+ANSWER_PROFILE_INSTRUCTIONS = {
+    "shipping": "Use this structure: direct logistics conclusion, likely reason, handling steps, fee/time caveat.",
+    "invoice": "Use this structure: whether invoice is supported, required order information, issuing or correction steps.",
+    "return_refund": "Use this structure: whether return/refund/exchange is supported, eligibility, proof required, next steps.",
+    "warranty_repair": "Use this structure: responsibility judgment, warranty/repair handling, required proof, escalation condition.",
+    "operation": "Use this structure: numbered operation steps, buttons/parts involved, safety or reset notes.",
+    "visual_part": "Use this structure: identify the part/status first, then explain the visual cue and the action to take.",
+    "general": "Use a concise customer-service answer with conclusion first, then concrete steps and caveats.",
+}
+
 
 def submission_id(question_id: str) -> str:
     match = re.search(r"(\d+)$", clean_text(question_id))
@@ -138,21 +310,91 @@ def is_english(text: str) -> bool:
     return letters > max(20, cjk * 2)
 
 
+def term_matches(text: str, term: str) -> bool:
+    blob = clean_text(text).casefold()
+    needle = clean_text(term).casefold()
+    if not needle:
+        return False
+    if re.fullmatch(r"[a-z0-9][a-z0-9 _-]*", needle):
+        pattern = r"\b" + re.escape(needle).replace(r"\ ", r"\s+") + r"s?\b"
+        return bool(re.search(pattern, blob))
+    return needle in blob
+
+
 def is_service_question(question: str) -> bool:
     blob = clean_text(question).casefold()
-    return any(term.casefold() in blob for term in SERVICE_TERMS)
+    for term in STRONG_SERVICE_TERMS:
+        if term == "order":
+            if re.search(r"\b(my|purchase|sales|order\s+number)\s+order\b|\border\s+(number|id|status|refund)\b", blob):
+                return True
+            continue
+        if term_matches(blob, term):
+            return True
+    return False
 
 
 def is_manual_visual_question(question: str) -> bool:
     blob = clean_text(question).casefold()
     if is_service_question(question):
         return False
-    return any(term.casefold() in blob for term in MANUAL_IMAGE_TERMS)
+    return any(term.casefold() in blob for term in (*MANUAL_IMAGE_TERMS, *MANUAL_IMAGE_EXTRA_TERMS))
 
 
 def is_uncertain_answer(text: str) -> bool:
     blob = clean_text(text).casefold()
     return any(term.casefold() in blob for term in UNCERTAIN_ANSWER_TERMS)
+
+
+def _contains_any(text: str, terms: tuple[str, ...] | list[str] | set[str]) -> bool:
+    return any(term_matches(text, term) for term in terms if clean_text(term))
+
+
+def important_question_terms(text: str) -> list[str]:
+    blob = clean_text(text).casefold()
+    terms: list[str] = []
+    for word in re.findall(r"[a-z][a-z0-9_-]{2,}", blob):
+        if word not in QUESTION_STOP_TERMS and word not in terms:
+            terms.append(word)
+    for seq in re.findall(r"[\u4e00-\u9fff]{2,}", blob):
+        if seq not in QUESTION_STOP_TERMS and len(seq) <= 10 and seq not in terms:
+            terms.append(seq)
+        window = seq[:32]
+        for size in (4, 3, 2):
+            if len(window) < size:
+                continue
+            for index in range(0, len(window) - size + 1):
+                gram = window[index : index + size]
+                if gram in QUESTION_STOP_TERMS:
+                    continue
+                if any(stop in gram for stop in QUESTION_STOP_TERMS if len(stop) >= 2 and len(gram) <= len(stop) + 1):
+                    continue
+                if gram not in terms:
+                    terms.append(gram)
+    return terms[:48]
+
+
+def answer_profile(question: str) -> str:
+    blob = clean_text(question).casefold()
+    if _contains_any(blob, ANSWER_PROFILE_TERMS["shipping"]):
+        return "shipping"
+    if _contains_any(blob, ANSWER_PROFILE_TERMS["invoice"]):
+        return "invoice"
+    if _contains_any(blob, ANSWER_PROFILE_TERMS["return_refund"]):
+        return "return_refund"
+    if is_service_question(question) and _contains_any(blob, ANSWER_PROFILE_TERMS["warranty_repair"]):
+        return "warranty_repair"
+    if _contains_any(blob, ANSWER_PROFILE_TERMS["visual_part"]):
+        return "visual_part"
+    if _contains_any(blob, ANSWER_PROFILE_TERMS["operation"]) or is_manual_visual_question(question):
+        return "operation"
+    if _contains_any(blob, ANSWER_PROFILE_TERMS["warranty_repair"]):
+        return "warranty_repair"
+    return "general"
+
+
+def answer_profile_instruction(question: str) -> str:
+    profile = answer_profile(question)
+    return f"Answer profile: {profile}. {ANSWER_PROFILE_INSTRUCTIONS.get(profile, ANSWER_PROFILE_INSTRUCTIONS['general'])}"
 
 
 def node_has_visual_caption(node: dict[str, Any]) -> bool:
@@ -325,13 +567,36 @@ def relevance_score(question: str, text: str) -> float:
     text = clean_text(text).casefold()
     if not question or not text:
         return 0.0
-    q_terms = set(re.findall(r"[a-z][a-z0-9_-]{2,}|[\u4e00-\u9fff]", question))
+    q_terms = important_question_terms(question)
     if not q_terms:
         return 0.0
-    hits = sum(1 for term in q_terms if term in text)
-    coverage = hits / max(1, len(q_terms))
-    density = hits / max(12, len(re.findall(r"[a-z][a-z0-9_-]{2,}|[\u4e00-\u9fff]", text)))
-    return min(1.0, 0.8 * coverage + 2.0 * density)
+    total_weight = 0.0
+    hit_weight = 0.0
+    for term in q_terms:
+        weight = 1.0 + min(1.0, max(0, len(term) - 2) * 0.2)
+        total_weight += weight
+        if term in text:
+            hit_weight += weight
+    coverage = hit_weight / max(1.0, total_weight)
+    density = hit_weight / max(18.0, len(text) / 80.0)
+    return min(1.0, 0.88 * coverage + 0.35 * density)
+
+
+def visual_cue_bonus(question: str, text: str) -> float:
+    bonus = 0.0
+    for profile in ("operation", "visual_part", "warranty_repair"):
+        terms = ANSWER_PROFILE_TERMS[profile]
+        if _contains_any(question, terms) and _contains_any(text, terms):
+            bonus += 0.08
+    return min(0.2, bonus)
+
+
+def min_visual_image_score(question: str) -> float:
+    if _contains_any(question, ANSWER_PROFILE_TERMS["visual_part"]):
+        return 0.16
+    if _contains_any(question, ANSWER_PROFILE_TERMS["operation"]):
+        return 0.13
+    return 0.1
 
 
 def visual_candidate_text(node: dict[str, Any], visual_row: dict[str, Any] | None = None) -> str:
@@ -377,12 +642,12 @@ def rerank_images_second_stage(
         if not image_id or not image_node_is_useful(node, question):
             continue
         rank_bonus = max(0.0, (31 - rank_pos) / 30.0)
-        score = 0.25 * rank_bonus
+        score = 0.12 * rank_bonus
         try:
             ranking_score = float(row.get("score") or 0.0)
         except (TypeError, ValueError):
             ranking_score = 0.0
-        score += 0.25 * max(0.0, ranking_score)
+        score += 0.18 * max(0.0, ranking_score)
         candidate_nodes[image_id] = (node, visual_by_node.get(clean_text(node.get("node_id")), {}), score)
 
     ranking_node_ids = {clean_text(row.get("node_id")) for row in ranking_rows[:30]}
@@ -399,9 +664,9 @@ def rerank_images_second_stage(
     scored: list[tuple[float, str, dict[str, Any]]] = []
     for image_id, (node, visual_row, base_score) in candidate_nodes.items():
         text = visual_candidate_text(node, visual_row)
-        score = base_score + 0.55 * relevance_score(question, text)
+        score = base_score + 0.68 * relevance_score(question, text) + visual_cue_bonus(question, text)
         if node_has_visual_caption(node) or clean_text(visual_row.get("qa_evidence")):
-            score += 0.18
+            score += 0.16
         if clean_text(node.get("ocr_text")) or clean_text(visual_row.get("ocr_text")):
             score += 0.04
         scored.append((score, image_id, node))
@@ -409,8 +674,9 @@ def rerank_images_second_stage(
 
     selected: list[str] = []
     uncaptioned = 0
+    min_score = min_visual_image_score(question)
     for score, image_id, node in scored:
-        if score < 0.18 and selected:
+        if score < min_score:
             continue
         if not node_has_visual_caption(node):
             if uncaptioned >= 1:
@@ -419,6 +685,8 @@ def rerank_images_second_stage(
         selected.append(image_id)
         if len(selected) >= max_images:
             break
+    if not selected and scored and scored[0][0] >= min_score * 0.65:
+        selected.append(scored[0][1])
     return selected
 
 
@@ -507,15 +775,30 @@ def select_evidence(
             images = reranked_images
 
     if allow_images and not images:
+        fallback_candidates: list[tuple[float, str, dict[str, Any]]] = []
         for row in ranking_rows[:12]:
             node = nodes_by_id.get(clean_text(row.get("node_id")), {})
             image_id = image_id_from_node(node)
             if image_id and image_id not in images and image_node_is_useful(node, question):
-                if not node_has_visual_caption(node) and uncaptioned_images >= 1:
-                    continue
-                if not node_has_visual_caption(node):
-                    uncaptioned_images += 1
-                images.append(image_id)
+                text = visual_candidate_text(node, {})
+                try:
+                    base = float(row.get("score") or 0.0)
+                except (TypeError, ValueError):
+                    base = 0.0
+                score = 0.15 * max(0.0, base) + 0.75 * relevance_score(question, text) + visual_cue_bonus(question, text)
+                if node_has_visual_caption(node):
+                    score += 0.12
+                fallback_candidates.append((score, image_id, node))
+        fallback_candidates.sort(key=lambda item: item[0], reverse=True)
+        min_score = min_visual_image_score(question) * 0.7
+        for score, image_id, node in fallback_candidates:
+            if score < min_score and images:
+                continue
+            if not node_has_visual_caption(node) and uncaptioned_images >= 1:
+                continue
+            if not node_has_visual_caption(node):
+                uncaptioned_images += 1
+            images.append(image_id)
             if len(images) >= 3:
                 break
     return selected, images[:3]
@@ -564,6 +847,7 @@ def build_prompt(question: str, evidence: list[dict[str, Any]], images: list[str
         if service_question
         else "这是商品手册/操作说明问题：请按步骤、部件或注意事项回答，优先提取手册里的具体操作。"
     )
+    profile_rule = answer_profile_instruction(question)
     user_prompt = f"""问题：
 {question}
 
@@ -573,6 +857,7 @@ def build_prompt(question: str, evidence: list[dict[str, Any]], images: list[str
 生成要求：
 1. {language_rule}
 2. {style_rule}
+Template: {profile_rule}
 3. 回答要像客服最终回复，不要说“根据证据1/2”，不要输出 Markdown。
 4. 如果问题问“如何做”，请用步骤；如果问“是什么/有哪些”，请列出关键点。
 5. 不要输出“资料中没有相关信息/does not include”等拒答式话术；如果证据不完整，请给出保守但可执行的通用步骤并说明注意安全。
@@ -651,6 +936,7 @@ def self_check_answer(
     if not ret:
         return ret
     service_question = is_service_question(question)
+    profile_rule = answer_profile_instruction(question)
     image_rule = (
         "This is a policy/service question: remove any <PIC> suffix."
         if service_question
@@ -672,6 +958,7 @@ Draft answer:
 {ret}
 
 Checklist:
+Profile rule: {profile_rule}
 1. Directly answer every sub-question.
 2. Keep concrete handling steps, required proof, fees/timing caveats, or manual operations when supported.
 3. Do not invent exact prices, deadlines, promises, or image ids.
