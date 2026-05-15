@@ -183,7 +183,11 @@ def main() -> None:
             hybrid_alpha=args.hybrid_alpha,
             kg_index=kg_index,
         )
-        rows.extend(row for row in question_rows if row.get("method") in args.methods)
+        for row in question_rows:
+            if row.get("method") not in args.methods:
+                continue
+            row["question"] = question.get("question", "")
+            rows.append(row)
         processed += 1
         if processed == 1 or processed % 10 == 0 or index == len(questions):
             print(f"Reranked {index}/{len(questions)} questions; processed={processed}; rows={len(rows)}", flush=True)

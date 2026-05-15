@@ -394,7 +394,7 @@ def answer_profile(question: str) -> str:
 
 def answer_profile_instruction(question: str) -> str:
     profile = answer_profile(question)
-    return f"Answer profile: {profile}. {ANSWER_PROFILE_INSTRUCTIONS.get(profile, ANSWER_PROFILE_INSTRUCTIONS['general'])}"
+    return ANSWER_PROFILE_INSTRUCTIONS.get(profile, ANSWER_PROFILE_INSTRUCTIONS["general"])
 
 
 def node_has_visual_caption(node: dict[str, Any]) -> bool:
@@ -458,7 +458,13 @@ def normalize_pic_suffix(text: str) -> str:
 
 
 def clean_submission_text(text: str, limit: int = 760) -> str:
-    text = clean_text(text).replace("```", "")
+    text = clean_text(text).replace("```", "").strip(" {}")
+    text = re.sub(r"\s*#{1,6}\s*", " ", text)
+    text = re.sub(r"\s*Evidence note:\s*[^<。.]*(?:[。.]|$)", " ", text, flags=re.I)
+    text = re.sub(r"^\s*(?:Answer\s+profile|Profile\s+rule|Template)\s*:\s*[A-Za-z_ -]+\.?\s*", "", text, flags=re.I)
+    text = re.sub(r"^\s*(?:Profile|Answer\s+style)\s*:\s*[A-Za-z_ -]+\.?\s*", "", text, flags=re.I)
+    text = re.sub(r"^\s*(?:Use\s+this\s+structure|Evidence\s+note)\s*:\s*", "", text, flags=re.I)
+    text = re.sub(r"^\s*:\s*", "", text)
     text = re.sub(r"^\s*(答案|输出)\s*[:：]?\s*", "", text, flags=re.I)
     text = re.sub(r"^\s*ret\b\s*[:：]?\s*", "", text, flags=re.I)
     text = normalize_pic_suffix(text)
@@ -542,10 +548,11 @@ def focused_content(node: dict[str, Any], question: str, limit: int = 900) -> st
     return content[start:end].strip(" ，,；;。")
 
 
-def load_rankings(path: str | Path) -> dict[str, list[dict[str, str]]]:
+def load_rankings(path: str | Path, method: str = "G4") -> dict[str, list[dict[str, str]]]:
+    wanted_method = clean_text(method).upper() or "G4"
     groups: dict[str, list[dict[str, str]]] = {}
     for row in read_csv(path):
-        if row.get("method") != "G4":
+        if clean_text(row.get("method")).upper() != wanted_method:
             continue
         qid = clean_text(row.get("question_id"))
         if qid:
@@ -690,6 +697,112 @@ def rerank_images_second_stage(
     return selected
 
 
+def _source_topic(text: str) -> str:
+    text = clean_text(text)
+    text = re.sub(r"\s*/\s*(?:segment|illustration)\s+\d+.*$", "", text, flags=re.I)
+    text = re.sub(r"\s*/\s*[A-Za-z0-9_-]+\s*$", "", text)
+    return text.strip()
+
+
+_VISUAL_INDEX_BY_DOC_CACHE: dict[int, dict[str, list[dict[str, Any]]]] = {}
+
+
+def visual_index_by_doc(visual_index: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    cache_key = id(visual_index)
+    cached = _VISUAL_INDEX_BY_DOC_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    by_doc: dict[str, list[dict[str, Any]]] = {}
+    for row in visual_index:
+        doc_id = clean_text(row.get("doc_id"))
+        if doc_id:
+            by_doc.setdefault(doc_id, []).append(row)
+    _VISUAL_INDEX_BY_DOC_CACHE[cache_key] = by_doc
+    return by_doc
+
+
+def relevance_score_from_terms(q_terms: list[str], text: str) -> float:
+    text = clean_text(text).casefold()
+    if not q_terms or not text:
+        return 0.0
+    total_weight = 0.0
+    hit_weight = 0.0
+    for term in q_terms:
+        weight = 1.0 + min(1.0, max(0, len(term) - 2) * 0.2)
+        total_weight += weight
+        if term in text:
+            hit_weight += weight
+    coverage = hit_weight / max(1.0, total_weight)
+    density = hit_weight / max(18.0, len(text) / 80.0)
+    return min(1.0, 0.88 * coverage + 0.35 * density)
+
+
+def global_visual_fallback_images(
+    question: str,
+    evidence: list[dict[str, Any]],
+    nodes_by_id: dict[str, dict[str, Any]],
+    visual_index: list[dict[str, Any]],
+    max_images: int = 3,
+) -> list[str]:
+    if not is_manual_visual_question(question) or not evidence or not visual_index:
+        return []
+
+    evidence_doc_ids = {
+        clean_text(item["node"].get("doc_id"))
+        for item in evidence
+        if clean_text(item["node"].get("doc_id"))
+    }
+    evidence_topics = {
+        _source_topic(clean_text(item["node"].get("source_ref")) or clean_text(item["node"].get("section")))
+        for item in evidence
+    }
+    evidence_topics = {topic for topic in evidence_topics if topic}
+    q_terms = important_question_terms(question)
+    min_threshold = max(0.08, min_visual_image_score(question) * 0.55)
+
+    scored: list[tuple[float, str, dict[str, Any]]] = []
+    candidate_rows: list[dict[str, Any]] = []
+    by_doc = visual_index_by_doc(visual_index)
+    for doc_id in evidence_doc_ids:
+        candidate_rows.extend(by_doc.get(doc_id, []))
+    if not candidate_rows:
+        candidate_rows = visual_index
+
+    for visual_row in candidate_rows:
+        image_id = clean_text(visual_row.get("image_id"))
+        if not image_id:
+            continue
+        node = nodes_by_id.get(clean_text(visual_row.get("node_id")), {}) or {"node_type": "figure", **visual_row}
+        doc_id = clean_text(visual_row.get("doc_id")) or clean_text(node.get("doc_id"))
+        if evidence_doc_ids and doc_id and doc_id not in evidence_doc_ids:
+            continue
+
+        source = clean_text(visual_row.get("source_ref")) or clean_text(node.get("source_ref"))
+        topic = _source_topic(source)
+        same_topic = any(topic and (topic == ev_topic or topic.startswith(ev_topic) or ev_topic.startswith(topic)) for ev_topic in evidence_topics)
+        text = visual_candidate_text(node, visual_row)
+        score = 0.72 * relevance_score_from_terms(q_terms, text)
+        if doc_id in evidence_doc_ids:
+            score += 0.12
+        if same_topic:
+            score += 0.28
+        if clean_text(visual_row.get("qa_evidence")) or clean_text(visual_row.get("visual_caption")):
+            score += 0.12
+        if clean_text(visual_row.get("ocr_text")):
+            score += 0.04
+        if score >= min_threshold:
+            scored.append((score, image_id, node))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    selected: list[str] = []
+    for _score, image_id, _node in scored:
+        if image_id not in selected:
+            selected.append(image_id)
+        if len(selected) >= max_images:
+            break
+    return selected
+
+
 def select_evidence(
     question: str,
     ranking_rows: list[dict[str, str]],
@@ -801,6 +914,18 @@ def select_evidence(
             images.append(image_id)
             if len(images) >= 3:
                 break
+    if allow_images and len(images) < 2:
+        for image_id in global_visual_fallback_images(
+            question,
+            selected,
+            nodes_by_id,
+            visual_index or [],
+            max_images=3,
+        ):
+            if image_id not in images:
+                images.append(image_id)
+            if len(images) >= 3:
+                break
     return selected, images[:3]
 
 
@@ -823,6 +948,31 @@ def format_evidence(question: str, evidence: list[dict[str, Any]]) -> str:
     return "\n\n".join(blocks)
 
 
+def evidence_quality_hint(question: str, evidence: list[dict[str, Any]], images: list[str]) -> str:
+    if not evidence:
+        return "Evidence note: no retrieved evidence was selected; give a conservative answer and do not invent image ids."
+    node_types = [clean_text(item["node"].get("node_type")) for item in evidence]
+    has_visual_node = any(node_type in {"figure", "table", "caption"} for node_type in node_types)
+    has_visual_text = any(
+        clean_text(item["node"].get(field))
+        for item in evidence
+        for field in ("visual_caption", "qa_evidence", "ocr_text", "key_objects", "visual_summary")
+    )
+    notes: list[str] = []
+    if is_manual_visual_question(question):
+        if images:
+            notes.append("Use the selected image ids only when they support the operation, part, label, table, or safety cue.")
+        elif has_visual_node or has_visual_text:
+            notes.append("Visual evidence exists in the text fields, but no valid image id was selected; answer from the visual text and do not append PIC.")
+        else:
+            notes.append("No reliable image was selected; answer with concrete manual steps from the text evidence and do not append PIC.")
+    if answer_profile(question) in {"visual_part", "operation"}:
+        notes.append("For parts, indicators, buttons, sizes, setup, or safety questions, prefer concrete labels and steps over saying the manual does not include the information.")
+    if not notes:
+        notes.append("Use only the strongest retrieved evidence and keep the answer direct.")
+    return "Evidence note: " + " ".join(notes)
+
+
 def build_prompt(question: str, evidence: list[dict[str, Any]], images: list[str]) -> tuple[str, str]:
     english = is_english(question)
     service_question = is_service_question(question)
@@ -840,7 +990,8 @@ def build_prompt(question: str, evidence: list[dict[str, Any]], images: list[str
         "你是比赛中的高质量多模态客服智能体答案生成器。评分标准重视：直接回应问题、结构清晰、"
         "答案完整有深度、图文互补。不要写空泛套话，不要只说“以平台为准/联系售后”。"
         "只能依据证据和常识客服流程回答；证据不足时也要优先根据最相关证据和产品常识给出可执行步骤，"
-        "不要把答案写成“资料未提供/无法回答”。最终只输出 ret 字段内容。"
+        "不要把答案写成“资料未提供/无法回答”。不要复制内部标签，例如 Answer profile、Profile rule、Template。"
+        "最终只输出 ret 字段内容。"
     )
     style_rule = (
         "这是售后服务问题：请明确责任判断、处理步骤、凭证要求、时效或费用口径；少用模糊话。"
@@ -848,6 +999,7 @@ def build_prompt(question: str, evidence: list[dict[str, Any]], images: list[str
         else "这是商品手册/操作说明问题：请按步骤、部件或注意事项回答，优先提取手册里的具体操作。"
     )
     profile_rule = answer_profile_instruction(question)
+    evidence_note = evidence_quality_hint(question, evidence, images)
     user_prompt = f"""问题：
 {question}
 
@@ -857,7 +1009,8 @@ def build_prompt(question: str, evidence: list[dict[str, Any]], images: list[str
 生成要求：
 1. {language_rule}
 2. {style_rule}
-Template: {profile_rule}
+Answer style guidance, do not copy this line: {profile_rule}
+Evidence quality guidance, do not copy this line: {evidence_note}
 3. 回答要像客服最终回复，不要说“根据证据1/2”，不要输出 Markdown。
 4. 如果问题问“如何做”，请用步骤；如果问“是什么/有哪些”，请列出关键点。
 5. 不要输出“资料中没有相关信息/does not include”等拒答式话术；如果证据不完整，请给出保守但可执行的通用步骤并说明注意安全。
@@ -937,6 +1090,7 @@ def self_check_answer(
         return ret
     service_question = is_service_question(question)
     profile_rule = answer_profile_instruction(question)
+    evidence_note = evidence_quality_hint(question, evidence, images)
     image_rule = (
         "This is a policy/service question: remove any <PIC> suffix."
         if service_question
@@ -946,6 +1100,7 @@ def self_check_answer(
         "You are a strict DataFountain submission answer reviewer. "
         "Revise the answer only when it misses a sub-question, invents unsupported details, has an invalid <PIC> suffix, "
         "or is too vague. Do not turn a concrete draft into a refusal such as 'the reference does not include this'. "
+        "Remove any leaked internal labels such as Answer profile, Profile rule, Template, or Evidence note. "
         "Return only the final ret text, with no Markdown and no explanation."
     )
     user_prompt = f"""Question:
@@ -958,7 +1113,8 @@ Draft answer:
 {ret}
 
 Checklist:
-Profile rule: {profile_rule}
+Answer style guidance, do not copy: {profile_rule}
+Evidence guidance, do not copy: {evidence_note}
 1. Directly answer every sub-question.
 2. Keep concrete handling steps, required proof, fees/timing caveats, or manual operations when supported.
 3. Do not invent exact prices, deadlines, promises, or image ids.
@@ -1040,6 +1196,7 @@ def main() -> None:
     parser.add_argument("--questions", default=DEFAULT_QUESTIONS)
     parser.add_argument("--nodes", default=DEFAULT_NODES)
     parser.add_argument("--rankings", default=DEFAULT_RANKINGS)
+    parser.add_argument("--ranking-method", default="G4", help="Rerank method to use from --rankings, e.g. G0/G1/G2/G3/G4.")
     parser.add_argument("--visual-index", default=DEFAULT_VISUAL_INDEX)
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
     parser.add_argument("--cache", default=DEFAULT_CACHE)
@@ -1060,7 +1217,7 @@ def main() -> None:
     if args.limit:
         questions = questions[: args.limit]
     nodes_by_id = {clean_text(node.get("node_id")): node for node in read_jsonl(args.nodes) if clean_text(node.get("node_id"))}
-    rankings = load_rankings(args.rankings)
+    rankings = load_rankings(args.rankings, args.ranking_method)
     visual_index = load_visual_index(args.visual_index)
     output = resolve_path(args.output)
     cache_path = resolve_path(args.cache)

@@ -601,7 +601,7 @@ def section_structure_scores(question: dict[str, Any], nodes: list[dict[str, Any
     blob = _question_blob(question)
     expanded_terms: list[str] = [query]
     for terms in SECTION_QUERY_HINTS.values():
-        if any(term.casefold() in blob for term in terms):
+        if any(_term_in_text(term, blob) for term in terms):
             expanded_terms.extend(terms)
     expanded_query = " ".join(dict.fromkeys(term for term in expanded_terms if term))
     raw_scores = _scores_from_cached_texts(expanded_query, nodes, "section")
@@ -617,9 +617,8 @@ def section_structure_scores(question: dict[str, Any], nodes: list[dict[str, Any
             bonus += 0.08
         if structure_type and structure_type != "section_title":
             bonus += 0.08
-        if clean_text(node.get("section")) and any(
-            term.casefold() in blob for term in [clean_text(node.get("section")).casefold()]
-        ):
+        section = clean_text(node.get("section"))
+        if section and _term_in_text(section, blob):
             bonus += 0.12
         scores[node_id] = raw_scores.get(node_id, 0.0) + bonus
     return scores
@@ -1096,7 +1095,18 @@ def _question_blob(question: dict[str, Any]) -> str:
 
 
 def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
-    return any(term.casefold() in text for term in terms)
+    return any(_term_in_text(term, text) for term in terms)
+
+
+def _term_in_text(term: str, text: str) -> bool:
+    term = clean_text(term).casefold()
+    text = clean_text(text).casefold()
+    if not term or not text:
+        return False
+    if any("\u4e00" <= ch <= "\u9fff" for ch in term):
+        return term in text
+    pattern = r"(?<![a-z0-9])" + re.escape(term).replace(r"\ ", r"\s+") + r"s?(?![a-z0-9])"
+    return re.search(pattern, text) is not None
 
 
 def _alias_in_text(alias: str, text: str) -> bool:
@@ -1197,7 +1207,7 @@ def kg_policy_names_for_question(question: dict[str, Any]) -> set[str]:
         if score >= 0.65 and intent in KG_POLICY_INTENT_NAMES
     }
     for name in KG_POLICY_INTENT_NAMES.values():
-        if name.casefold() in blob:
+        if _term_in_text(name, blob):
             names.add(name)
     return names
 
@@ -1224,7 +1234,7 @@ def kg_query_context(question: dict[str, Any], kg_index: dict[str, Any] | None) 
     for entity_id, entity_type, name, matched in candidates:
         matched_terms = {clean_text(term).casefold() for term in matched if clean_text(term)}
         if entity_type == "image":
-            if any(len(term) > 4 and term in blob for term in matched_terms):
+            if any(len(term) > 4 and _term_in_text(term, blob) for term in matched_terms):
                 hits.add(entity_id)
             continue
         if entity_type == "policy":
@@ -1372,7 +1382,7 @@ def after_sales_intents(question: dict[str, Any]) -> dict[str, float]:
     blob = _question_blob(question)
     scores: dict[str, float] = {}
     for intent, terms in AFTER_SALES_INTENT_TERMS.items():
-        hits = sum(1 for term in terms if term.casefold() in blob)
+        hits = sum(1 for term in terms if _term_in_text(term, blob))
         if hits:
             scores[intent] = min(1.0, 0.35 + 0.18 * hits)
     if not scores and _contains_any(blob, AFTER_SALES_MANUAL_HINTS):
@@ -1428,7 +1438,7 @@ def after_sales_domain_scores(
         matched_intents = [
             intent
             for intent, terms in AFTER_SALES_INTENT_TERMS.items()
-            if any(term.casefold() in blob for term in terms)
+            if any(_term_in_text(term, blob) for term in terms)
         ]
         policy_or_manual_bonus = 0.0
         if _contains_any(blob, AFTER_SALES_MANUAL_HINTS):

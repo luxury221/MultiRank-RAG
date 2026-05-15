@@ -1,27 +1,41 @@
-# 多模态 RAG 证据检测页面
+# Frontend
 
-常用流程：
+The frontend is a React + Vite application for the multimodal RAG evidence workflow.
+
+## Features
+
+- Select built-in documents or upload a PDF.
+- Ask a custom question or choose a prepared question.
+- View the generated answer.
+- Inspect evidence cards and ranked supporting evidence.
+- Open visual evidence files served by the backend.
+
+## Run in Development
 
 ```bash
-python scripts/13_export_frontend_data.py
 cd web
 npm install
-npm run build
-cd dist
-python -m http.server 5174 --bind 127.0.0.1
+npm run dev
 ```
 
-在当前 WSL 项目路径下，推荐用 Python 静态服务器打开构建产物：
+Default development URL:
+
+```text
+http://127.0.0.1:5173
+```
+
+The frontend expects the backend at:
+
+```text
+http://127.0.0.1:8765
+```
+
+## Build
 
 ```bash
-cd /home/blacklions/workspace/Linux/多模态RAG/web/dist
-python3 -m http.server 5174 --bind 127.0.0.1
+cd web
+npm run build
 ```
 
-然后访问 `http://127.0.0.1:5174/`。
+The build output is written to `web/dist/`, which is ignored by Git.
 
-上传 PDF 功能需要同时启动后端：
-
-```powershell
-D:\conda_envs\rag-gpu\python.exe -m uvicorn backend.app:app --host 127.0.0.1 --port 8765
-```

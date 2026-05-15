@@ -29,14 +29,17 @@ web/dist/
 web/.vite/
 web/public/app-data.json
 web/public/outputs/
+web/public/outputs/**
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
 # Generated RAG outputs
-outputs/
+outputs/*
+!outputs/
 !outputs/.gitkeep
+!outputs/README.md
 *.npz
 *.npy
 *.pt
@@ -55,6 +58,9 @@ DataFountain/
 
 # Local cloned dependencies / external repositories
 external/
+
+# Local one-off experiment scripts
+scripts/33_build_last_submission.py
 
 # Logs and runtime files
 *.log

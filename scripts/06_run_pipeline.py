@@ -40,6 +40,11 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_flag(name: str, default: bool = False) -> bool:
+    value = clean_env(name, "1" if default else "0").lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 def run_step(args: list[str]) -> None:
     print(">", " ".join(args))
     subprocess.run(args, cwd=str(ROOT), check=True)
@@ -117,6 +122,22 @@ def main() -> None:
     parser.add_argument("--kg-dir", default="outputs/kg")
     parser.add_argument("--text-index-dir", default="outputs/text_index")
     parser.add_argument("--visual-index-dir", default="outputs/visual_index")
+    parser.add_argument(
+        "--routes",
+        default=clean_env("RAG_QUESTION_ROUTES", ""),
+        help="Optional question route CSV used for product/intent-aware query expansion.",
+    )
+    parser.add_argument(
+        "--expand-query",
+        action="store_true",
+        default=env_flag("RAG_EXPAND_QUERY", False),
+        help="Expand retrieval and reranking queries using --routes.",
+    )
+    parser.add_argument(
+        "--rerank-methods",
+        default=clean_env("RAG_RERANK_METHODS", "G0,G1,G2,G3,G4"),
+        help="Comma-separated rerank methods written by scripts/04_rerank.py.",
+    )
     parser.add_argument("--skip-kg", action="store_true")
     args = parser.parse_args()
     rerank_k = args.rerank_k if args.rerank_k is not None else args.top_k
@@ -231,60 +252,63 @@ def main() -> None:
             ]
         )
 
-    run_step(
-        [
-            py,
-            "scripts/03_retrieve_candidates.py",
-            "--questions",
-            questions,
-            "--nodes",
-            nodes,
-            "--top-k",
-            str(args.candidate_k),
-            "--retriever",
-            candidate_retriever,
-            "--embedding-model",
-            args.embedding_model,
-            "--embedding-cache",
-            args.embedding_cache,
-            "--embedding-device",
-            args.embedding_device,
-            "--embedding-batch-size",
-            str(args.embedding_batch_size),
-            "--hybrid-alpha",
-            str(args.hybrid_alpha),
-            "--kg-dir",
-            args.kg_dir,
-        ]
-    )
-    run_step(
-        [
-            py,
-            "scripts/04_rerank.py",
-            "--questions",
-            questions,
-            "--nodes",
-            nodes,
-            "--edges",
-            edges,
-            "--top-k",
-            str(rerank_k),
-            "--retriever",
-            rerank_retriever,
-            "--embedding-model",
-            args.embedding_model,
-            "--embedding-cache",
-            args.embedding_cache,
-            "--embedding-device",
-            args.embedding_device,
-            "--embedding-batch-size",
-            str(args.embedding_batch_size),
-            "--hybrid-alpha",
-            str(args.hybrid_alpha),
-            "--kg-dir",
-            args.kg_dir,
-        ]
-    )
+    retrieve_step = [
+        py,
+        "scripts/03_retrieve_candidates.py",
+        "--questions",
+        questions,
+        "--nodes",
+        nodes,
+        "--top-k",
+        str(args.candidate_k),
+        "--retriever",
+        candidate_retriever,
+        "--embedding-model",
+        args.embedding_model,
+        "--embedding-cache",
+        args.embedding_cache,
+        "--embedding-device",
+        args.embedding_device,
+        "--embedding-batch-size",
+        str(args.embedding_batch_size),
+        "--hybrid-alpha",
+        str(args.hybrid_alpha),
+        "--kg-dir",
+        args.kg_dir,
+    ]
+    rerank_step = [
+        py,
+        "scripts/04_rerank.py",
+        "--questions",
+        questions,
+        "--nodes",
+        nodes,
+        "--edges",
+        edges,
+        "--top-k",
+        str(rerank_k),
+        "--retriever",
+        rerank_retriever,
+        "--embedding-model",
+        args.embedding_model,
+        "--embedding-cache",
+        args.embedding_cache,
+        "--embedding-device",
+        args.embedding_device,
+        "--embedding-batch-size",
+        str(args.embedding_batch_size),
+        "--hybrid-alpha",
+        str(args.hybrid_alpha),
+        "--kg-dir",
+        args.kg_dir,
+        "--methods",
+        args.rerank_methods,
+    ]
+    if args.expand_query and args.routes:
+        retrieve_step.extend(["--routes", args.routes, "--expand-query"])
+        rerank_step.extend(["--routes", args.routes, "--expand-query"])
+    run_step(retrieve_step)
+    run_step(rerank_step)
     run_step([py, "scripts/05_evaluate.py", "--questions", questions])
     run_step([py, "scripts/08_compare_methods.py", "--questions", questions])
     run_step([py, "scripts/09_build_evidence_chains.py", "--questions", questions])
