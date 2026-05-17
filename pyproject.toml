@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multirank-rag"
+version = "0.1.0"
+description = "Multimodal RAG, GraphRAG, and evidence-chain QA for complex PDF documents."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "MultiRank-RAG contributors" }
+]
+dependencies = [
+  "fastapi",
+  "networkx",
+  "openai",
+  "pandas",
+  "pillow",
+  "pymupdf",
+  "pypdf",
+  "pdfplumber",
+  "python-multipart",
+  "scikit-learn",
+  "sentence-transformers",
+  "streamlit",
+  "uvicorn",
+]
+
+[tool.setuptools.packages.find]
+include = ["backend*"]
+exclude = ["data*", "docs*", "outputs*", "external*", "web*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"

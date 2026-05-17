@@ -217,14 +217,26 @@ ABECD + Evidence Guard + SelfCorrect merge-v2
 ## 目录结构
 
 ```text
-backend/      FastAPI 后端，负责上传、解析、检索、证据链和文件服务
+backend/      FastAPI 后端包，按 routers/services/schemas/jobs/config/utils 拆分
 web/          React + Vite 前端，负责文档选择、提问、证据卡片和相关性展示
-scripts/      离线 pipeline、实验、评测、诊断与数据处理脚本
+scripts/      CLI 工作台，保留稳定入口，并按主链路/评测/数据/历史工具分类
 configs/      环境配置示例、模型配置示例
 data/         小规模样例数据与问题文件，不存放私有 PDF
 docs/         架构、实验、GraphRAG、模型网关和报告材料
 outputs/      运行产物目录，默认不提交到 Git
 external/     外部依赖或临时克隆仓库，默认不提交到 Git
+```
+
+后端内部结构：
+
+```text
+backend/app.py                 应用工厂和路由注册
+backend/config.py              路径、CORS、环境变量和模型 provider 配置
+backend/routers/               HTTP API 入口
+backend/schemas/               Pydantic 请求/响应模型
+backend/jobs/                  上传任务状态、日志、运行目录
+backend/services/              PDF/RAG pipeline、检索、视觉增强、前端结果序列化
+backend/utils/                 文件名、CSV 等小工具
 ```
 
 重要文档：
@@ -234,7 +246,9 @@ external/     外部依赖或临时克隆仓库，默认不提交到 Git
 - [docs/MODEL_GATEWAY.md](docs/MODEL_GATEWAY.md)：Ark、Xinference、OpenAI-compatible 配置
 - [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)：实验设计
 - [docs/EVALUATION.md](docs/EVALUATION.md)：评测指标
+- [docs/REPOSITORY_STRUCTURE.md](docs/REPOSITORY_STRUCTURE.md)：仓库结构说明
 - [scripts/README.md](scripts/README.md)：离线脚本入口
+- [scripts/CATALOG.md](scripts/CATALOG.md)：脚本分类索引
 - [backend/README.md](backend/README.md)：后端接口说明
 - [web/README.md](web/README.md)：前端运行说明
 

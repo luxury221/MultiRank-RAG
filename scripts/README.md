@@ -1,6 +1,10 @@
 # Scripts
 
-`scripts/` contains the offline pipeline for parsing PDFs, building graph indexes, retrieving evidence, reranking, and generating evidence chains/cards.
+`scripts/` is the command-line layer for MultiRank-RAG. It contains maintained pipeline entrypoints, evaluation tools, dataset preparation helpers, and historical research utilities.
+
+For a categorized file-by-file index, see [CATALOG.md](CATALOG.md).
+
+The root-level script paths are kept stable so existing experiment commands still work. Shared production-facing API behavior lives in `backend/`, while long-running research workflows remain here as explicit CLI tools.
 
 ## Main Entry
 
@@ -38,6 +42,18 @@ Useful options:
 50_export_experiment_summary.py Export experiment summaries to Excel/CSV
 52_self_correct_evidence.py     Verify, merge, or replace evidence chains
 ```
+
+## Script Groups
+
+```text
+Core pipeline       01, 02, 03, 04, 06, 09, 10, 11, 23, 34, 40, 42, 52
+Shared libraries    pipeline_common.py, embedding_index.py, rerank_lib.py, ark_clients.py
+Evaluation          05, 08, 12_evaluate, 14, 24_ablate, 50
+Data preparation    07, 19, 22, 27, 28, 41
+Historical tools    DataFountain/competition-specific generators and diagnostics
+```
+
+Historical scripts are kept for reproducibility, but the recommended user-facing path is the main pipeline plus backend/frontend.
 
 ## Main Experiment
 

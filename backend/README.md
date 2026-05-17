@@ -2,6 +2,20 @@
 
 The backend is a FastAPI service for online PDF analysis and evidence-chain generation.
 
+## Structure
+
+```text
+backend/app.py                 FastAPI app factory and router registration
+backend/config.py              Paths, CORS, environment helpers, provider settings
+backend/routers/               HTTP endpoints only
+backend/schemas/               Pydantic request/response schemas
+backend/jobs/                  Upload job directories, status files, logs
+backend/services/              PDF/RAG pipeline, retrieval, visual caption, frontend serialization
+backend/utils/                 Small reusable helpers
+```
+
+The route layer is intentionally thin. Heavy work such as parsing, visual evidence enrichment, GraphRAG indexing, retrieval, reranking, evidence-chain generation, and card generation lives in `backend/services/`.
+
 ## Responsibilities
 
 1. Receive uploaded PDF files and user questions.
@@ -25,6 +39,16 @@ GET  /api/health
 POST /api/analyze
 GET  /api/jobs/{job_id}
 GET  /api/jobs/{job_id}/files/{path}
+```
+
+The main upload flow is:
+
+```text
+POST /api/analyze
+  -> routers/analyze.py validates form data and creates a job
+  -> jobs/store.py persists status and logs
+  -> services/pipeline.py runs parse -> visual -> graph -> GraphRAG -> retrieve -> rerank -> chain -> card
+  -> routers/jobs.py returns status, result JSON, and generated files
 ```
 
 ## Environment
