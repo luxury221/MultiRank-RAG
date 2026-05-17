@@ -5,7 +5,7 @@ import json
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -26,9 +26,16 @@ def _env(name: str, default: str = "") -> str:
 DOUBAO_EMBEDDING_VISION_MODEL = "doubao-embedding-vision-250615"
 LOCAL_FALLBACK_EMBEDDING_MODEL = "BAAI/bge-m3"
 
-DEFAULT_EMBEDDING_PROVIDER = _env("RAG_EMBEDDING_PROVIDER", "auto").strip().lower() or "auto"
+DEFAULT_EMBEDDING_PROVIDER = (
+    _env("RAG_EMBEDDING_PROVIDER", "").strip().lower()
+    or _env("RAG_MODEL_PROVIDER", "auto").strip().lower()
+    or "auto"
+)
 DEFAULT_EMBEDDING_MODEL = (
     _env("RAG_EMBEDDING_MODEL", "").strip()
+    or _env("XINFERENCE_EMBEDDING_MODEL", "").strip()
+    or _env("OPENAI_COMPATIBLE_EMBEDDING_MODEL", "").strip()
+    or _env("LOCAL_EMBEDDING_MODEL", "").strip()
     or _env("ARK_EMBEDDING_MODEL", "").strip()
     or (DOUBAO_EMBEDDING_VISION_MODEL if _env("ARK_API_KEY", "").strip() else LOCAL_FALLBACK_EMBEDDING_MODEL)
 )
@@ -38,6 +45,8 @@ DEFAULT_EMBEDDING_WORKERS = int(_env("RAG_EMBEDDING_WORKERS", "1"))
 DEFAULT_EMBEDDING_CACHE_DIR = OUTPUT_DIR / "embeddings"
 
 ARK_EMBEDDING_MODEL_HINTS = ("doubao-embedding", "embedding-vision", "multimodal")
+OPENAI_COMPATIBLE_PROVIDERS = {"openai_compatible", "openai-compatible", "local_openai", "local-server"}
+XINFERENCE_PROVIDERS = {"xinference"}
 VISUAL_EMBED_NODE_TYPES = {"figure", "table", "caption"}
 VISUAL_TEXT_FIELDS = (
     "visual_title",
@@ -124,9 +133,18 @@ def _embedding_provider(model_name: str, provider: str = DEFAULT_EMBEDDING_PROVI
     provider = (provider or "auto").strip().lower()
     if provider in {"ark", "doubao", "volcengine"}:
         return "ark"
+    if provider in XINFERENCE_PROVIDERS:
+        return "xinference"
+    if provider in OPENAI_COMPATIBLE_PROVIDERS:
+        return "openai_compatible"
     if provider in {"local", "sentence-transformers", "sentence_transformers", "st"}:
         return "local"
     lowered = model_name.lower()
+    if _env("XINFERENCE_EMBEDDING_MODEL", "").strip() and model_name == _env("XINFERENCE_EMBEDDING_MODEL", "").strip():
+        return "xinference"
+    openai_model = _env("OPENAI_COMPATIBLE_EMBEDDING_MODEL", "").strip() or _env("LOCAL_EMBEDDING_MODEL", "").strip()
+    if openai_model and model_name == openai_model:
+        return "openai_compatible"
     if any(hint in lowered for hint in ARK_EMBEDDING_MODEL_HINTS):
         return "ark"
     return "local"
@@ -192,12 +210,16 @@ class EmbeddingIndex:
     _model: Any | None = None
     _ark_embedder: Any | None = None
     _ark_cache: Any | None = None
+    _openai_embedder: Any | None = None
+    _openai_cache: Any | None = None
+    _query_embedding_cache: dict[str, np.ndarray] = field(default_factory=dict, init=False, repr=False)
 
     @classmethod
     def from_nodes(
         cls,
         nodes: list[dict[str, Any]],
         model_name: str = DEFAULT_EMBEDDING_MODEL,
+        provider: str = DEFAULT_EMBEDDING_PROVIDER,
         cache_dir: str | Path = DEFAULT_EMBEDDING_CACHE_DIR,
         device: str = DEFAULT_EMBEDDING_DEVICE,
         batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
@@ -207,7 +229,7 @@ class EmbeddingIndex:
         node_ids = [clean_text(node.get("node_id")) for node in valid_nodes]
         cache_dir = resolve_path(cache_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
-        provider = _embedding_provider(model_name)
+        provider = _embedding_provider(model_name, provider)
         content_hash = _nodes_hash(valid_nodes, model_name, provider)
         cache_path = cache_dir / f"{provider}_{_safe_model_name(model_name)}_{content_hash[:16]}.npz"
 
@@ -215,6 +237,8 @@ class EmbeddingIndex:
         if embeddings is None:
             if provider == "ark":
                 embeddings = cls._encode_ark_nodes(valid_nodes, model_name, cache_dir)
+            elif provider in {"xinference", "openai_compatible"}:
+                embeddings = cls._encode_openai_nodes(valid_nodes, model_name, cache_dir, provider)
             else:
                 texts = [node_embedding_text(node) for node in valid_nodes]
                 model = cls._load_model(model_name, device)
@@ -306,6 +330,10 @@ class EmbeddingIndex:
         return resolve_path(cache_dir) / f"{_safe_model_name(model_name)}_items.jsonl"
 
     @staticmethod
+    def _openai_cache_path(cache_dir: str | Path, model_name: str, provider: str) -> Path:
+        return resolve_path(cache_dir) / f"{provider}_{_safe_model_name(model_name)}_items.jsonl"
+
+    @staticmethod
     def _encode_ark_nodes(nodes: list[dict[str, Any]], model_name: str, cache_dir: str | Path) -> np.ndarray:
         try:
             from ark_clients import ArkMultimodalEmbedder, JsonlEmbeddingCache
@@ -358,10 +386,59 @@ class EmbeddingIndex:
 
         return EmbeddingIndex._normalize_rows(np.asarray(vectors, dtype="float32"))
 
+    @staticmethod
+    def _encode_openai_nodes(
+        nodes: list[dict[str, Any]],
+        model_name: str,
+        cache_dir: str | Path,
+        provider: str,
+    ) -> np.ndarray:
+        try:
+            from ark_clients import JsonlEmbeddingCache, OpenAICompatibleEmbedder
+        except ImportError as exc:
+            raise RuntimeError("OpenAI-compatible embedding retriever needs scripts/ark_clients.py.") from exc
+
+        embedder = OpenAICompatibleEmbedder(provider=provider, model=model_name)
+        cache = JsonlEmbeddingCache(EmbeddingIndex._openai_cache_path(cache_dir, model_name, provider))
+        total = len(nodes)
+        workers = max(1, int(_env("RAG_EMBEDDING_WORKERS", "1")))
+        vectors: list[list[float] | None] = [None] * total
+
+        def encode_one(index: int, node: dict[str, Any]) -> tuple[int, list[float]]:
+            text = node_embedding_text(node)
+            try:
+                vector = embedder.embed_text(text, cache=cache)
+            except Exception as exc:
+                node_id = clean_text(node.get("node_id")) or f"#{index + 1}"
+                raise RuntimeError(f"{provider} embedding failed for node {node_id}: {exc}") from exc
+            return index, vector
+
+        if workers == 1:
+            for index, node in enumerate(nodes):
+                done_index, vector = encode_one(index, node)
+                vectors[done_index] = vector
+                completed = done_index + 1
+                if completed == 1 or completed % 10 == 0 or completed == total:
+                    print(f"{provider} embedding encoded {completed}/{total} nodes")
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(encode_one, index, node) for index, node in enumerate(nodes)]
+                completed = 0
+                for future in as_completed(futures):
+                    done_index, vector = future.result()
+                    vectors[done_index] = vector
+                    completed += 1
+                    if completed == 1 or completed % 10 == 0 or completed == total:
+                        print(f"{provider} embedding encoded {completed}/{total} nodes")
+
+        return EmbeddingIndex._normalize_rows(np.asarray(vectors, dtype="float32"))
+
     @property
     def model(self) -> Any:
         if self.provider == "ark":
             raise RuntimeError("Ark embedding index does not use a local sentence-transformers model.")
+        if self.provider in {"xinference", "openai_compatible"}:
+            raise RuntimeError("OpenAI-compatible embedding index does not use a local sentence-transformers model.")
         if self._model is None:
             self._model = self._load_model(self.model_name, self.device)
         return self._model
@@ -382,22 +459,81 @@ class EmbeddingIndex:
             self._ark_cache = JsonlEmbeddingCache(self._ark_cache_path(self.cache_dir, self.model_name))
         return self._ark_cache
 
+    @property
+    def openai_embedder(self) -> Any:
+        if self._openai_embedder is None:
+            from ark_clients import OpenAICompatibleEmbedder
+
+            self._openai_embedder = OpenAICompatibleEmbedder(provider=self.provider, model=self.model_name)
+        return self._openai_embedder
+
+    @property
+    def openai_cache(self) -> Any:
+        if self._openai_cache is None:
+            from ark_clients import JsonlEmbeddingCache
+
+            self._openai_cache = JsonlEmbeddingCache(
+                self._openai_cache_path(self.cache_dir, self.model_name, self.provider)
+            )
+        return self._openai_cache
+
+    def _encode_queries(self, queries: list[str]) -> dict[str, np.ndarray]:
+        unique_queries = [query for query in dict.fromkeys(clean_text(query) for query in queries) if query]
+        missing = [query for query in unique_queries if query not in self._query_embedding_cache]
+        if missing:
+            if self.provider == "ark":
+                for query in missing:
+                    vector = self.ark_embedder.embed_text(query, cache=self.ark_cache)
+                    self._query_embedding_cache[query] = self._normalize_rows(
+                        np.asarray([vector], dtype="float32")
+                    )[0]
+            elif self.provider in {"xinference", "openai_compatible"}:
+                for query in missing:
+                    vector = self.openai_embedder.embed_text(query, cache=self.openai_cache)
+                    self._query_embedding_cache[query] = self._normalize_rows(
+                        np.asarray([vector], dtype="float32")
+                    )[0]
+            else:
+                embeddings = self._encode(self.model, missing, batch_size=max(1, self.batch_size))
+                for query, embedding in zip(missing, embeddings):
+                    self._query_embedding_cache[query] = embedding.astype("float32")
+        return {
+            query: self._query_embedding_cache[query]
+            for query in unique_queries
+            if query in self._query_embedding_cache
+        }
+
+    def score_many(self, queries: list[Any], nodes: list[dict[str, Any]] | None = None) -> list[dict[str, float]]:
+        clean_queries = [clean_text(query) for query in queries]
+        target_ids = self.node_ids if nodes is None else [clean_text(node.get("node_id")) for node in nodes]
+        target_ids = [node_id for node_id in target_ids if node_id]
+        empty = {node_id: 0.0 for node_id in target_ids}
+        if self.embeddings.size == 0:
+            return [dict(empty) for _ in clean_queries]
+
+        query_embeddings = self._encode_queries(clean_queries)
+        valid_queries = [query for query in dict.fromkeys(clean_queries) if query and query in query_embeddings]
+        if not valid_queries:
+            return [dict(empty) for _ in clean_queries]
+
+        matrix = np.vstack([query_embeddings[query] for query in valid_queries]).astype("float32")
+        if self.embeddings.ndim != 2 or matrix.ndim != 2 or matrix.shape[1] != self.embeddings.shape[1]:
+            return [dict(empty) for _ in clean_queries]
+
+        all_scores = np.matmul(self.embeddings, matrix.T)
+        score_maps: dict[str, dict[str, float]] = {}
+        target_set = set(target_ids)
+        for column, query in enumerate(valid_queries):
+            score_maps[query] = {
+                node_id: float(max(0.0, score))
+                for node_id, score in zip(self.node_ids, all_scores[:, column].tolist())
+                if node_id in target_set
+            }
+        return [score_maps.get(query, dict(empty)) if query else dict(empty) for query in clean_queries]
+
     def score(self, query: Any, nodes: list[dict[str, Any]] | None = None) -> dict[str, float]:
         query_text = clean_text(query)
         target_ids = self.node_ids if nodes is None else [clean_text(node.get("node_id")) for node in nodes]
         if not query_text or self.embeddings.size == 0:
             return {node_id: 0.0 for node_id in target_ids if node_id}
-
-        if self.provider == "ark":
-            query_vector = self.ark_embedder.embed_text(query_text, cache=self.ark_cache)
-            query_embedding = self._normalize_rows(np.asarray([query_vector], dtype="float32"))[0]
-        else:
-            query_embedding = self._encode(self.model, [query_text], batch_size=1)[0]
-        if self.embeddings.ndim != 2 or query_embedding.shape[0] != self.embeddings.shape[1]:
-            return {node_id: 0.0 for node_id in target_ids if node_id}
-        all_scores = np.matmul(self.embeddings, query_embedding)
-        score_by_id = {
-            node_id: float(max(0.0, score))
-            for node_id, score in zip(self.node_ids, all_scores.tolist())
-        }
-        return {node_id: score_by_id.get(node_id, 0.0) for node_id in target_ids if node_id}
+        return self.score_many([query_text], nodes=nodes)[0]

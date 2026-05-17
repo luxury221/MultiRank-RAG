@@ -30,7 +30,9 @@ VISUAL_SECTION_RE = re.compile(r"\n*\s*Visual summary:\s*.*$", re.S)
 QWEN_DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 QWEN_DEFAULT_MODEL = "qwen-vl-plus"
 ARK_DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
-CAPTION_PROVIDERS = {"local", "qwen", "doubao"}
+XINFERENCE_DEFAULT_BASE_URL = "http://127.0.0.1:9997/v1"
+OPENAI_COMPATIBLE_DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
+CAPTION_PROVIDERS = {"local", "qwen", "doubao", "xinference", "openai_compatible"}
 
 
 def env_value(name: str, default: str = "") -> str:
@@ -50,6 +52,13 @@ def default_caption_provider() -> str:
     ).lower()
     if provider in CAPTION_PROVIDERS:
         return provider
+    model_provider = clean_text(env_value("RAG_MODEL_PROVIDER", "")).lower()
+    if model_provider == "xinference" and env_value("XINFERENCE_VISION_MODEL"):
+        return "xinference"
+    if model_provider in {"openai_compatible", "openai-compatible", "local_openai", "local-server"} and (
+        env_value("OPENAI_COMPATIBLE_VISION_MODEL") or env_value("LOCAL_VISION_MODEL")
+    ):
+        return "openai_compatible"
     return "qwen" if env_value("DASHSCOPE_API_KEY") else "local"
 
 
@@ -336,6 +345,7 @@ class QwenVisionCaptioner:
         base_url: str = QWEN_DEFAULT_BASE_URL,
         api_key_env: str = "DASHSCOPE_API_KEY",
         timeout: float = 60.0,
+        allow_no_api_key: bool = False,
     ) -> None:
         self.model_name = model_name or QWEN_DEFAULT_MODEL
         self.base_url = base_url or QWEN_DEFAULT_BASE_URL
@@ -343,6 +353,8 @@ class QwenVisionCaptioner:
         self.timeout = timeout
         self.client = None
         api_key = env_value(self.api_key_env)
+        if not api_key and allow_no_api_key:
+            api_key = "not-used"
         if not api_key:
             return
         from openai import OpenAI
@@ -681,6 +693,23 @@ def main() -> None:
     parser.add_argument("--ark-base-url", default=env_value("RAG_ARK_BASE_URL", ARK_DEFAULT_BASE_URL))
     parser.add_argument("--ark-api-key-env", default=env_value("RAG_ARK_API_KEY_ENV", "ARK_API_KEY"))
     parser.add_argument("--ark-timeout", type=float, default=env_float("RAG_ARK_TIMEOUT", 60.0))
+    parser.add_argument("--xinference-model", default=env_value("XINFERENCE_VISION_MODEL", env_value("RAG_VISION_MODEL", "")))
+    parser.add_argument("--xinference-base-url", default=env_value("XINFERENCE_BASE_URL", XINFERENCE_DEFAULT_BASE_URL))
+    parser.add_argument("--xinference-api-key-env", default=env_value("XINFERENCE_API_KEY_ENV", "XINFERENCE_API_KEY"))
+    parser.add_argument("--xinference-timeout", type=float, default=env_float("XINFERENCE_TIMEOUT", 60.0))
+    parser.add_argument(
+        "--openai-compatible-model",
+        default=env_value("OPENAI_COMPATIBLE_VISION_MODEL", env_value("LOCAL_VISION_MODEL", "")),
+    )
+    parser.add_argument(
+        "--openai-compatible-base-url",
+        default=env_value("OPENAI_COMPATIBLE_BASE_URL", env_value("LOCAL_MODEL_BASE_URL", OPENAI_COMPATIBLE_DEFAULT_BASE_URL)),
+    )
+    parser.add_argument(
+        "--openai-compatible-api-key-env",
+        default=env_value("OPENAI_COMPATIBLE_API_KEY_ENV", "OPENAI_COMPATIBLE_API_KEY"),
+    )
+    parser.add_argument("--openai-compatible-timeout", type=float, default=env_float("OPENAI_COMPATIBLE_TIMEOUT", 60.0))
     args = parser.parse_args()
 
     ensure_project_dirs()
@@ -712,6 +741,35 @@ def main() -> None:
             raise SystemExit(
                 f"{args.ark_api_key_env} or ARK_MODEL is not set. Set both before using --caption-provider doubao."
             )
+    elif args.caption_provider == "xinference":
+        if not (args.caption_model or args.xinference_model):
+            raise SystemExit("XINFERENCE_VISION_MODEL is not set. Set it before using --caption-provider xinference.")
+        captioner = QwenVisionCaptioner(
+            model_name=args.caption_model or args.xinference_model,
+            base_url=args.xinference_base_url,
+            api_key_env=args.xinference_api_key_env,
+            timeout=args.xinference_timeout,
+            allow_no_api_key=True,
+        )
+        if not captioner.available():
+            raise SystemExit(
+                f"{args.xinference_api_key_env} is unavailable and the Xinference client could not be created."
+            )
+    elif args.caption_provider == "openai_compatible":
+        if not (args.caption_model or args.openai_compatible_model):
+            raise SystemExit(
+                "OPENAI_COMPATIBLE_VISION_MODEL or LOCAL_VISION_MODEL is not set. "
+                "Set it before using --caption-provider openai_compatible."
+            )
+        captioner = QwenVisionCaptioner(
+            model_name=args.caption_model or args.openai_compatible_model,
+            base_url=args.openai_compatible_base_url,
+            api_key_env=args.openai_compatible_api_key_env,
+            timeout=args.openai_compatible_timeout,
+            allow_no_api_key=True,
+        )
+        if not captioner.available():
+            raise SystemExit("OpenAI-compatible vision client could not be created.")
     else:
         captioner = VisualCaptioner(args.caption_model, args.caption_device) if args.caption_model else VisualCaptioner("")
     caption_node_ids = {item.strip() for item in re.split(r"[;,，；]\s*", args.caption_node_ids) if item.strip()}
@@ -739,7 +797,7 @@ def main() -> None:
     visual_nodes = [node for node in nodes if node.get("crop_image_path")]
     print(f"Updated {len(nodes)} nodes across {processed_docs} PDFs")
     print(f"Added visual crops to {len(visual_nodes)} nodes")
-    if args.caption_provider in {"qwen", "doubao"} or args.caption_model:
+    if args.caption_provider in {"qwen", "doubao", "xinference", "openai_compatible"} or args.caption_model:
         print(f"Generated {caption_count} VLM captions with {captioner.model_name}")
     print(f"Wrote visual-enhanced nodes to {resolve_path(args.output)}")
 

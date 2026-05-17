@@ -8,9 +8,18 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
+import urllib.error
+import urllib.request
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+try:
+    import winreg
+except ImportError:  # pragma: no cover - only used on Windows.
+    winreg = None  # type: ignore[assignment]
 
 from pipeline_common import (
     DEFAULT_NODES,
@@ -22,6 +31,7 @@ from pipeline_common import (
     ensure_project_dirs,
     make_node_id,
     normalize_doc_id,
+    preview,
     read_csv,
     read_jsonl,
     resolve_path,
@@ -63,7 +73,9 @@ class TemplateDecision:
     selection_reason: str
 
 
-CONFIG_ROOT = Path(__file__).resolve().parents[1] / "configs" / "chunk_templates"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_ROOT = PROJECT_ROOT / "configs" / "chunk_templates"
+_LOCAL_ENV_CACHE: dict[str, str] | None = None
 
 
 COMMON_SECTION_ALIASES = (
@@ -1649,6 +1661,251 @@ def find_mineru_content_list(output_dir: Path, pdf_path: Path | None = None) -> 
     return candidates[0] if len(candidates) == 1 else None
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    value = clean_text(read_env(name, "1" if default else "0")).lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def windows_user_env(name: str) -> str:
+    if winreg is None:
+        return ""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            value, _ = winreg.QueryValueEx(key, name)
+            return str(value).strip()
+    except OSError:
+        return ""
+
+
+def load_local_env() -> dict[str, str]:
+    global _LOCAL_ENV_CACHE
+    if _LOCAL_ENV_CACHE is not None:
+        return _LOCAL_ENV_CACHE
+    values: dict[str, str] = {}
+    for path in (PROJECT_ROOT / ".env", PROJECT_ROOT / ".env.local"):
+        if not path.exists():
+            continue
+        for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            if key:
+                values[key] = value
+    _LOCAL_ENV_CACHE = values
+    return values
+
+
+def read_env(name: str, default: str = "") -> str:
+    return clean_text(os.getenv(name)) or clean_text(load_local_env().get(name)) or windows_user_env(name) or default
+
+
+def mineru_api_token() -> str:
+    for name in ("MINERU_API_KEY", "MINERU_TOKEN", "MINERU_API_TOKEN"):
+        token = read_env(name)
+        if token:
+            return token
+    return ""
+
+
+def mineru_api_base(api_url: str) -> str:
+    url = clean_text(api_url or read_env("MINERU_API_URL") or "https://mineru.net/api/v4")
+    url = url.rstrip("/")
+    for suffix in (
+        "/file-urls/batch",
+        "/extract/task/batch",
+        "/extract/task",
+    ):
+        if url.endswith(suffix):
+            return url[: -len(suffix)].rstrip("/")
+    return url
+
+
+def mineru_cloud_api_enabled(api_url: str) -> bool:
+    mode = clean_text(read_env("MINERU_API_MODE", "")).lower()
+    if mode in {"local", "cli", "off", "false", "0"}:
+        return False
+    if mode in {"cloud", "openapi", "api", "remote"}:
+        return bool(mineru_api_token())
+    return bool(mineru_api_token())
+
+
+def mineru_json_request(method: str, url: str, token: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    data = None
+    headers = {
+        "Accept": "*/*",
+        "Authorization": f"Bearer {token}",
+    }
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=int(read_env("MINERU_API_HTTP_TIMEOUT", "90"))) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"MinerU API HTTP {exc.code}: {preview(detail, 360)}") from exc
+    try:
+        result = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"MinerU API returned non-JSON response: {preview(body, 360)}") from exc
+    if int(result.get("code", 0)) != 0:
+        raise RuntimeError(f"MinerU API error: {result.get('msg') or preview(result, 360)}")
+    return result
+
+
+def mineru_upload_file(upload_url: str, pdf_path: Path) -> None:
+    with pdf_path.open("rb") as f:
+        data = f.read()
+    request = urllib.request.Request(upload_url, data=data, method="PUT")
+    try:
+        with urllib.request.urlopen(request, timeout=int(read_env("MINERU_API_UPLOAD_TIMEOUT", "600"))) as response:
+            if response.status < 200 or response.status >= 300:
+                raise RuntimeError(f"upload returned HTTP {response.status}")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"MinerU API upload failed HTTP {exc.code}: {preview(detail, 360)}") from exc
+
+
+def first_upload_url(payload: dict[str, Any]) -> str:
+    file_urls = payload.get("data", {}).get("file_urls", [])
+    if not file_urls:
+        return ""
+    first = file_urls[0]
+    if isinstance(first, str):
+        return first
+    if isinstance(first, dict):
+        for key in ("url", "upload_url", "file_url"):
+            if clean_text(first.get(key)):
+                return clean_text(first.get(key))
+    return ""
+
+
+def find_first_key(payload: Any, names: set[str]) -> str:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key in names and isinstance(value, str) and value.startswith(("http://", "https://")):
+                return value
+        for value in payload.values():
+            found = find_first_key(value, names)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = find_first_key(item, names)
+            if found:
+                return found
+    return ""
+
+
+def collect_states(payload: Any) -> set[str]:
+    states: set[str] = set()
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key in {"state", "status"} and isinstance(value, str):
+                states.add(value.lower())
+            else:
+                states.update(collect_states(value))
+    elif isinstance(payload, list):
+        for item in payload:
+            states.update(collect_states(item))
+    return states
+
+
+def safe_extract_zip(zip_path: Path, output_dir: Path) -> None:
+    target_root = output_dir.resolve()
+    with zipfile.ZipFile(zip_path) as archive:
+        for member in archive.infolist():
+            target = (output_dir / member.filename).resolve()
+            try:
+                target.relative_to(target_root)
+            except ValueError as exc:
+                raise RuntimeError(f"Unsafe file path in MinerU zip: {member.filename}")
+            archive.extract(member, output_dir)
+
+
+def download_file(url: str, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(url, timeout=int(read_env("MINERU_API_DOWNLOAD_TIMEOUT", "600"))) as response:
+        with target.open("wb") as f:
+            shutil.copyfileobj(response, f)
+
+
+def run_mineru_cloud_api(
+    pdf_path: Path,
+    output_dir: Path,
+    method: str = "auto",
+    lang: str = "",
+    api_url: str = "",
+) -> Path:
+    token = mineru_api_token()
+    if not token:
+        raise RuntimeError("MINERU_API_KEY is required when MINERU_API_MODE=cloud.")
+    base_url = mineru_api_base(api_url)
+    model_version = read_env("MINERU_API_MODEL_VERSION") or read_env("MINERU_MODEL_VERSION") or "vlm"
+    language = clean_text(lang or read_env("MINERU_API_LANGUAGE") or read_env("MINERU_LANG") or "ch")
+    data_id = normalize_doc_id(pdf_path.stem)
+    payload: dict[str, Any] = {
+        "files": [{"name": pdf_path.name, "data_id": data_id}],
+        "model_version": model_version,
+        "enable_formula": env_bool("MINERU_API_ENABLE_FORMULA", True),
+        "enable_table": env_bool("MINERU_API_ENABLE_TABLE", True),
+        "language": language,
+    }
+    if read_env("MINERU_API_IS_OCR"):
+        payload["files"][0]["is_ocr"] = env_bool("MINERU_API_IS_OCR", method == "ocr")
+    elif method == "ocr":
+        payload["files"][0]["is_ocr"] = True
+
+    print(f"> MinerU API request upload URL: {base_url}/file-urls/batch")
+    upload_payload = mineru_json_request("POST", f"{base_url}/file-urls/batch", token, payload)
+    batch_id = clean_text(upload_payload.get("data", {}).get("batch_id"))
+    upload_url = first_upload_url(upload_payload)
+    if not batch_id or not upload_url:
+        raise RuntimeError(f"MinerU API did not return batch_id/file_urls: {preview(upload_payload, 360)}")
+
+    print("> MinerU API upload PDF")
+    mineru_upload_file(upload_url, pdf_path)
+
+    poll_url = f"{base_url}/extract-results/batch/{batch_id}"
+    timeout_s = int(read_env("MINERU_API_TIMEOUT", "1800"))
+    interval_s = max(2, int(read_env("MINERU_API_POLL_INTERVAL", "5")))
+    deadline = time.time() + timeout_s
+    zip_url = ""
+    last_payload: dict[str, Any] = {}
+    print(f"> MinerU API polling batch_id={batch_id}")
+    while time.time() < deadline:
+        last_payload = mineru_json_request("GET", poll_url, token)
+        zip_url = find_first_key(last_payload, {"full_zip_url", "zip_url"})
+        if zip_url:
+            break
+        states = collect_states(last_payload)
+        if states & {"failed", "fail", "error"}:
+            raise RuntimeError(f"MinerU API task failed: {preview(last_payload, 360)}")
+        time.sleep(interval_s)
+    if not zip_url:
+        raise RuntimeError(f"MinerU API timed out waiting for result: {preview(last_payload, 360)}")
+
+    zip_path = output_dir / f"{data_id}_mineru_result.zip"
+    extract_dir = output_dir / data_id
+    print("> MinerU API download result zip")
+    download_file(zip_url, zip_path)
+    safe_extract_zip(zip_path, extract_dir)
+    content_list = find_mineru_content_list(output_dir, pdf_path)
+    if not content_list:
+        raise RuntimeError(f"MinerU API result downloaded but no content_list JSON was found under {output_dir}.")
+    return content_list
+
+
 def run_mineru(
     pdf_path: Path,
     output_dir: Path,
@@ -1657,28 +1914,31 @@ def run_mineru(
     lang: str = "",
     api_url: str = "",
 ) -> Path:
-    mineru_exe = os.getenv("MINERU_BIN") or shutil.which("mineru")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    existing = find_mineru_content_list(output_dir, pdf_path)
+    if existing and read_env("RAG_MINERU_FORCE", "0").lower() not in {"1", "true", "yes"}:
+        return existing
+    api_url = api_url or read_env("MINERU_API_URL", "")
+    if mineru_cloud_api_enabled(api_url):
+        return run_mineru_cloud_api(pdf_path, output_dir, method=method, lang=lang, api_url=api_url)
+
+    mineru_exe = read_env("MINERU_BIN") or shutil.which("mineru")
     if not mineru_exe:
         raise RuntimeError(
             "MinerU is not installed or `mineru` is not on PATH. "
             'Install it with: pip install uv && uv pip install -U "mineru[all]"'
         )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    existing = find_mineru_content_list(output_dir, pdf_path)
-    if existing and os.getenv("RAG_MINERU_FORCE", "0") not in {"1", "true", "yes"}:
-        return existing
-    api_url = api_url or os.getenv("MINERU_API_URL", "")
     cmd = [mineru_exe, "-p", str(pdf_path), "-o", str(output_dir), "-b", backend, "-m", method]
     if api_url:
         cmd.extend(["--api-url", api_url])
     if lang:
         cmd.extend(["-l", lang])
-    extra = clean_text(os.getenv("MINERU_EXTRA_ARGS", ""))
+    extra = read_env("MINERU_EXTRA_ARGS", "")
     if extra:
         cmd.extend(extra.split())
     env = os.environ.copy()
-    if os.getenv("MINERU_MODEL_SOURCE"):
-        env["MINERU_MODEL_SOURCE"] = os.getenv("MINERU_MODEL_SOURCE", "")
+    if read_env("MINERU_MODEL_SOURCE"):
+        env["MINERU_MODEL_SOURCE"] = read_env("MINERU_MODEL_SOURCE", "")
     print(">", " ".join(cmd))
     subprocess.run(cmd, check=True, env=env)
     content_list = find_mineru_content_list(output_dir, pdf_path)

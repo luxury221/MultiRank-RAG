@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from collections import Counter
 
 from embedding_index import (
@@ -53,7 +54,11 @@ def main() -> None:
     parser.add_argument("--embedding-device", default=DEFAULT_EMBEDDING_DEVICE)
     parser.add_argument("--embedding-batch-size", type=int, default=DEFAULT_EMBEDDING_BATCH_SIZE)
     parser.add_argument("--hybrid-alpha", type=float, default=0.7, help="Embedding weight for --retriever hybrid.")
-    parser.add_argument("--kg-dir", default="outputs/kg", help="KG-lite directory. Empty string disables KG scoring.")
+    parser.add_argument(
+        "--kg-dir",
+        default=os.getenv("RAG_KG_DIR", "outputs/graphrag"),
+        help="GraphRAG/KG directory. Empty string disables graph scoring.",
+    )
     parser.add_argument("--routes", default="", help="Optional DataFountain question route CSV for product-aware query expansion.")
     parser.add_argument("--expand-query", action="store_true", help="Append product route aliases to retrieval queries.")
     parser.add_argument("--resume", action="store_true", help="Reuse complete question rows already present in output.")
@@ -87,12 +92,22 @@ def main() -> None:
             flush=True,
         )
 
-    processed = 0
+    work_items: list[tuple[int, dict[str, str], dict[str, str]]] = []
     for index, question in enumerate(questions, start=1):
         qid = question.get("question_id", "")
         if qid in completed_qids:
             continue
         query_question = expand_question(question, routes.get(submission_id(qid))) if routes else question
+        work_items.append((index, question, query_question))
+
+    precomputed_embedding_scores: list[dict[str, float] | None] = [None] * len(work_items)
+    if embedding_index is not None and work_items:
+        query_texts = [query_question.get("question", "") for _, _, query_question in work_items]
+        precomputed_embedding_scores = embedding_index.score_many(query_texts, nodes=nodes)
+        print(f"Precomputed embedding query scores for {len(work_items)} questions.", flush=True)
+
+    processed = 0
+    for item_index, (index, question, query_question) in enumerate(work_items):
         candidates, scores = retrieve_candidates(
             query_question,
             nodes,
@@ -105,6 +120,7 @@ def main() -> None:
             embedding_batch_size=args.embedding_batch_size,
             hybrid_alpha=args.hybrid_alpha,
             kg_index=kg_index,
+            precomputed_embedding_scores=precomputed_embedding_scores[item_index],
         )
         for rank, node in enumerate(candidates, start=1):
             rows.append(

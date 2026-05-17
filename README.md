@@ -1,116 +1,94 @@
 # MultiRank-RAG
 
-MultiRank-RAG 是一个面向复杂 PDF、产品手册和图文混合知识库的多模态 RAG 证据问答系统。项目将 PDF 解析、视觉证据理解、图文检索、轻量知识图谱、分层重排序和证据链生成整合为一条可复现的工程链路，目标是让回答不仅能生成结论，还能说明结论由哪些文本、图片、表格或页面结构支撑。
+MultiRank-RAG is a multimodal RAG system for complex PDF documents, product manuals, and image-text knowledge bases. It focuses on one core goal: answering questions with a traceable evidence chain instead of returning an isolated response.
 
-当前仓库聚焦于一个完整的多模态 RAG 应用系统：用户可以上传或选择 PDF 文档，系统解析文档中的文本、图片、表格和版面关系，围绕用户问题检索证据、生成答案，并在前端展示可追溯的证据链。仓库中的公开数据集仅作为 benchmark 与工程调试参考，不是项目的核心叙事。
+The system parses PDF layout, converts text/tables/figures/captions into unified evidence nodes, builds document and GraphRAG relations, retrieves multimodal evidence, reranks it with query-aware structural signals, and finally generates grounded answers and visual evidence cards.
 
 ## Highlights
 
-- 多模态证据节点：统一建模 text、title、table、figure、caption、equation 等节点。
-- MinerU PDF 解析：保留章节、页码、bbox、图表和版面结构信息。
-- 视觉证据增强：对图片和图表生成 caption、OCR、key objects、QA evidence 等字段。
-- 多路召回：支持 BM25、lexical、embedding、KG、visual、fusion 等召回方式。
-- MultiRank G0-G4 重排序：融合语义相似度、PPR 图传播、bridge、reference、visual grounding、domain、product 和 KG 信号。
-- 证据链生成：回答前组织主证据、上下文证据、图片证据和结构化关系。
-- 工程化演示：提供离线脚本、FastAPI 服务、React 可视化页面和输出质量诊断工具。
+- **Complex PDF parsing**: supports MinerU and native parsing, preserving page, section, bbox, table, figure, caption, and layout metadata.
+- **Unified evidence schema**: models text, title, table, figure, caption, equation, and page nodes in one retrieval graph.
+- **Multimodal evidence enrichment**: adds image crops, OCR, visual captions, key objects, visual summaries, and QA-oriented evidence fields.
+- **GraphRAG layer**: builds document structure edges, entity links, semantic relations, and community summaries for graph-aware retrieval.
+- **Hybrid retrieval**: combines BM25, lexical matching, embeddings, visual evidence, and GraphRAG/KG signals.
+- **MultiRank reranking**: compares V0-V4 / G0-G4 variants with semantic similarity, PPR, bridge scores, reference matching, visual grounding, adaptive routing, and evidence-chain signals.
+- **Evidence-chain answer generation**: generates final answers from V4 chains only, with evidence citations and `<PIC:node_id>` markers for visual evidence.
+- **Full-stack demo**: includes FastAPI backend and React frontend for uploading PDFs, asking questions, and inspecting evidence cards.
 
-## Architecture
+## System Architecture
 
 ```text
-PDF / Manual / Reference Knowledge Base
+PDF / Manual / Knowledge Base
         |
         v
 PDF Parser
   - MinerU / native parser
-  - page, section, bbox, table, figure
+  - page, section, bbox, table, figure, caption
         |
         v
 Evidence Node Builder
-  - nodes.jsonl
-  - edges.jsonl
-  - unified evidence schema
+  - outputs/parsed/nodes.jsonl
+  - outputs/parsed/edges.jsonl
         |
         v
 Visual Evidence Enrichment
   - image crop
-  - visual_caption
-  - OCR / key_objects / qa_evidence
+  - OCR / caption / key objects / QA evidence
         |
         v
-Index and KG Layer
-  - BM25 / lexical index
-  - embedding index
-  - visual index
-  - product, part, action, fault, policy graph
+GraphRAG Builder
+  - document structure graph
+  - semantic entity graph
+  - relation and community summaries
         |
         v
 Hybrid Retrieval
-  - candidate pool
-  - question routing
-  - optional query expansion
+  - BM25 / lexical / embedding / visual / GraphRAG
         |
         v
 MultiRank Reranking
   - G0 raw retrieval
-  - G1 semantic
+  - G1 semantic rerank
   - G2 semantic + PPR
   - G3 bridge + reference
-  - G4 visual + chain + KG + product/domain
+  - G4 adaptive multimodal evidence chain
         |
         v
-Evidence Chain and Answer
-  - grounded prompt
-  - self-check
-  - PIC suffix validation
-  - API / UI / CSV output
+Evidence Chain / Grounded Answer / Evidence Card / API
 ```
 
-更多细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+Detailed design notes are available in:
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- [docs/GRAPHRAG.md](docs/GRAPHRAG.md)
+- [docs/MODEL_GATEWAY.md](docs/MODEL_GATEWAY.md)
+- [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)
+- [docs/EVALUATION.md](docs/EVALUATION.md)
 
 ## Repository Layout
 
 ```text
-backend/      FastAPI 后端，支持上传 PDF、运行分析任务、返回证据链
-web/          React + Vite 前端，用于证据检测和可视化展示
-scripts/      离线流水线脚本，覆盖解析、召回、重排、生成、诊断
-configs/      环境变量示例和 chunk 模板配置
-data/         本地输入问题、样例数据和待解析 PDF 目录
-docs/         架构说明、实验记录、展示材料和仓库维护说明
-demo/         早期 Streamlit 演示入口
-outputs/      运行产物目录，默认不提交到 Git
-external/     外部依赖仓库，默认不提交到 Git
+backend/      FastAPI service for PDF upload, analysis jobs, and evidence-chain APIs
+web/          React + Vite frontend for document selection, Q&A, and evidence visualization
+scripts/      Offline pipeline scripts for parsing, GraphRAG, retrieval, reranking, generation, and diagnostics
+configs/      Environment examples and chunking templates
+data/         Local questions, sample data, and PDF input folders
+docs/         Architecture notes, evaluation design, and project documentation
+outputs/      Generated artifacts, ignored by Git except placeholders
+external/     External cloned dependencies, ignored by Git
 ```
+
+The public datasets and benchmark files in this repository are only used as engineering references. The project itself is designed as a general complex-document multimodal RAG system, not as a dataset-specific submission script.
 
 ## Quick Start
 
-### 1. Install Python Dependencies
+Install Python dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configure Environment
-
-参考配置文件：
-
-```text
-configs/doubao_optimized.env.example
-```
-
-关键配置项包括：
-
-```bash
-RAG_PDF_PARSER=mineru
-RAG_EMBEDDING_MODEL=doubao-embedding-vision-250615
-RAG_ANSWER_MODEL=<your-doubao-endpoint-id>
-RAG_BACKEND_CANDIDATE_RETRIEVER=fusion
-RAG_BACKEND_RERANK_RETRIEVER=fusion
-RAG_BACKEND_ENABLE_KG=1
-```
-
-实际 API key 请写入本机环境变量或私有 `.env` 文件，不要提交到 Git。
-
-### 3. Run Offline Pipeline
+Run the offline pipeline on local questions:
 
 ```bash
 python scripts/06_run_pipeline.py \
@@ -119,32 +97,39 @@ python scripts/06_run_pipeline.py \
   --rerank-k 10
 ```
 
-常用参数：
+Run a lightweight sample check:
 
 ```bash
---skip-parse
---skip-visual
---skip-kg
---candidate-retriever fusion
---rerank-retriever fusion
+python scripts/06_run_pipeline.py \
+  --sample \
+  --retriever bm25 \
+  --candidate-k 10 \
+  --rerank-k 3 \
+  --rerank-methods G4
 ```
 
-### 4. Run Backend
+Run the V4 evidence-chain experiment with answer generation:
+
+```bash
+python scripts/40_run_main_experiment.py \
+  --dataset-name sample \
+  --variants V4 \
+  --build-chains \
+  --generate-answers \
+  --answer-provider none
+```
+
+Use `--answer-provider ark`, `--answer-provider xinference`, or `--answer-provider openai_compatible` when model services are configured.
+
+## Web Demo
+
+Start the backend:
 
 ```bash
 python -m uvicorn backend.app:app --host 127.0.0.1 --port 8765
 ```
 
-主要接口：
-
-```text
-GET  /api/health
-POST /api/analyze
-GET  /api/jobs/{job_id}
-GET  /api/jobs/{job_id}/files/{path}
-```
-
-### 5. Run Frontend
+Start the frontend:
 
 ```bash
 cd web
@@ -152,37 +137,72 @@ npm install
 npm run dev
 ```
 
-前端默认连接：
+The frontend supports uploading PDFs, selecting built-in documents, asking custom or preset questions, and viewing evidence cards with ranked supporting evidence.
+
+## Important Outputs
 
 ```text
-http://127.0.0.1:8765
+outputs/parsed/nodes.jsonl                  Unified evidence nodes
+outputs/parsed/edges.jsonl                  Document structure edges
+outputs/graphrag/entities.jsonl             GraphRAG entities
+outputs/graphrag/relations.jsonl            GraphRAG relations
+outputs/graphrag/communities.jsonl          Community summaries
+outputs/rankings/candidates.csv             Retrieved candidate evidence
+outputs/rankings/reranked.csv               G0-G4 reranking results
+outputs/evidence_chains/chains.jsonl        Question-level evidence chains
+outputs/evidence_chains/answers.csv         Chain-grounded final answers
+outputs/evidence_cards/                     Rendered evidence card assets
 ```
 
-## Data and Benchmarks
+## Configuration
 
-仓库支持两类输入：
+Use `.env.example` and `configs/doubao_optimized.env.example` as references. Put real keys in a local `.env` file, which is ignored by Git.
 
-- 自定义 PDF：放入 `data/pdfs/` 或通过前端上传。
-- 参考 benchmark：例如本地公开知识库目录，用于验证检索、重排、图文证据选择和答案生成效果。
+Common configuration:
 
-这些数据用于验证系统能力，而不是定义项目本身。正式项目说明、答辩和 README 应重点描述系统架构、技术方法、证据链能力和前后端体验。
+```bash
+RAG_PDF_PARSER=mineru
+MINERU_API_MODE=cloud
+MINERU_API_URL=https://mineru.net/api/v4
+MINERU_API_KEY=<your-mineru-api-key>
 
-## Important Notes
+RAG_MODEL_PROVIDER=ark
+RAG_EMBEDDING_PROVIDER=ark
+RAG_EMBEDDING_MODEL=doubao-embedding-vision-250615
+RAG_ANSWER_PROVIDER=ark
+RAG_ANSWER_MODEL=<your-doubao-endpoint-id>
 
-- `outputs/`、外部数据目录、`external/` 和 `web/node_modules/` 默认不进入版本库。
-- 不要把 API key、私有文档、外部数据集或生成的大量中间文件发布到 GitHub。
-- benchmark 结果只能作为参考，不能替代真实业务场景下的多模态证据质量评估。
-- 本地格式校验只能保证产物结构正确，不能等价于答案质量评分。
+RAG_KG_DIR=outputs/graphrag
+RAG_BACKEND_CANDIDATE_RETRIEVER=fusion
+RAG_BACKEND_RERANK_RETRIEVER=fusion
+```
+
+Supported model gateway modes:
+
+```text
+ark                 Direct Ark / Doubao / DashScope-compatible provider
+xinference          Local or remote Xinference OpenAI-compatible gateway
+openai_compatible   Any local OpenAI-compatible service
+```
+
+Visual captioning, embedding, answer generation, and reranking can be configured independently through `RAG_VISUAL_CAPTION_PROVIDER`, `RAG_EMBEDDING_PROVIDER`, `RAG_ANSWER_PROVIDER`, and `RAG_RERANK_PROVIDER`.
+
+## Evaluation
+
+The project uses two complementary evaluation layers:
+
+- **Retrieval and reranking metrics**: Recall@k, MRR, nDCG, evidence hit, modality hit.
+- **Evidence-chain metrics**: chain presence, gold-node coverage, page hit, modality coverage, visual grounding, cross-modal support, and relation support.
+
+This separation is intentional: MultiRank-RAG aims not only to retrieve the correct chunk, but also to organize a coherent, inspectable evidence path for the final answer.
 
 ## Documentation
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): 系统架构和核心链路。
-- [docs/EVALUATION.md](docs/EVALUATION.md): 评估方法、benchmark 用法和已知局限。
-- [docs/REPOSITORY_GUIDE.md](docs/REPOSITORY_GUIDE.md): 仓库整理和协作规范。
-- [scripts/README.md](scripts/README.md): 脚本入口说明。
-- [backend/README.md](backend/README.md): 后端接口说明。
-- [web/README.md](web/README.md): 前端启动说明。
+- [scripts/README.md](scripts/README.md): script entry points and offline pipeline usage.
+- [backend/README.md](backend/README.md): backend API and job flow.
+- [web/README.md](web/README.md): frontend setup and UI behavior.
+- [docs/REPOSITORY_GUIDE.md](docs/REPOSITORY_GUIDE.md): repository maintenance notes.
 
 ## Current Status
 
-项目已经具备完整原型能力，包括离线文档问答、上传 PDF 分析、证据链展示和证据卡片生成。当前主要改进方向是提升检索稳定性、降低图片误匹配、建立更可靠的本地评估流程，并将实验版本管理得更清晰。
+The project currently provides a complete research prototype: PDF upload, parsing, multimodal node construction, GraphRAG indexing, hybrid retrieval, MultiRank reranking, evidence-chain generation, grounded answer generation, and frontend evidence visualization. Future work focuses on stronger visual grounding, more robust PDF parsing, richer GraphRAG relation extraction, and answer-level evaluation with LLM judges.

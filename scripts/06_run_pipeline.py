@@ -11,7 +11,7 @@ from pipeline_common import ensure_project_dirs
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VISUAL_CAPTION_PROVIDERS = {"local", "qwen", "doubao"}
+VISUAL_CAPTION_PROVIDERS = {"local", "qwen", "doubao", "xinference", "openai_compatible"}
 
 
 def clean_env(name: str, default: str = "") -> str:
@@ -30,6 +30,13 @@ def default_visual_caption_provider() -> str:
     ).lower()
     if provider in VISUAL_CAPTION_PROVIDERS:
         return provider
+    model_provider = clean_env("RAG_MODEL_PROVIDER").lower()
+    if model_provider == "xinference" and clean_env("XINFERENCE_VISION_MODEL"):
+        return "xinference"
+    if model_provider in {"openai_compatible", "openai-compatible", "local_openai", "local-server"} and (
+        clean_env("OPENAI_COMPATIBLE_VISION_MODEL") or clean_env("LOCAL_VISION_MODEL")
+    ):
+        return "openai_compatible"
     return "qwen" if clean_env("DASHSCOPE_API_KEY") else "local"
 
 
@@ -50,6 +57,13 @@ def run_step(args: list[str]) -> None:
     subprocess.run(args, cwd=str(ROOT), check=True)
 
 
+def kg_index_exists(path: str) -> bool:
+    root = Path(path)
+    if not root.is_absolute():
+        root = ROOT / root
+    return (root / "entities.jsonl").exists() and (root / "relations.jsonl").exists()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the full parse/build/retrieve/rerank/evaluate pipeline.")
     parser.add_argument("--sample", action="store_true", help="Use data/sample instead of real PDFs.")
@@ -61,14 +75,14 @@ def main() -> None:
     parser.add_argument(
         "--parser",
         choices=["mineru", "native"],
-        default=os.getenv("RAG_PDF_PARSER", "mineru"),
+        default=clean_env("RAG_PDF_PARSER", "mineru"),
         help="PDF parser backend used by scripts/01_parse_pdf.py.",
     )
-    parser.add_argument("--mineru-output-dir", default=os.getenv("RAG_MINERU_OUTPUT_DIR", "outputs/mineru"))
-    parser.add_argument("--mineru-api-url", default=os.getenv("MINERU_API_URL", ""))
-    parser.add_argument("--mineru-backend", default=os.getenv("MINERU_BACKEND", "pipeline"))
-    parser.add_argument("--mineru-method", default=os.getenv("MINERU_METHOD", "auto"))
-    parser.add_argument("--mineru-lang", default=os.getenv("MINERU_LANG", ""))
+    parser.add_argument("--mineru-output-dir", default=clean_env("RAG_MINERU_OUTPUT_DIR", "outputs/mineru"))
+    parser.add_argument("--mineru-api-url", default=clean_env("MINERU_API_URL", ""))
+    parser.add_argument("--mineru-backend", default=clean_env("MINERU_BACKEND", "pipeline"))
+    parser.add_argument("--mineru-method", default=clean_env("MINERU_METHOD", "auto"))
+    parser.add_argument("--mineru-lang", default=clean_env("MINERU_LANG", ""))
     parser.add_argument(
         "--chunk-template",
         choices=["auto", "general", "ai", "math", "finance", "medical"],
@@ -96,6 +110,23 @@ def main() -> None:
     parser.add_argument("--ark-vision-model", default=clean_env("RAG_ARK_VISION_MODEL"))
     parser.add_argument("--ark-base-url", default=clean_env("RAG_ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"))
     parser.add_argument("--ark-api-key-env", default=clean_env("RAG_ARK_API_KEY_ENV", "ARK_API_KEY"))
+    parser.add_argument("--xinference-vision-model", default=clean_env("XINFERENCE_VISION_MODEL") or clean_env("RAG_VISION_MODEL"))
+    parser.add_argument("--xinference-base-url", default=clean_env("XINFERENCE_BASE_URL", "http://127.0.0.1:9997/v1"))
+    parser.add_argument("--xinference-api-key-env", default=clean_env("XINFERENCE_API_KEY_ENV", "XINFERENCE_API_KEY"))
+    parser.add_argument(
+        "--openai-compatible-vision-model",
+        default=clean_env("OPENAI_COMPATIBLE_VISION_MODEL") or clean_env("LOCAL_VISION_MODEL"),
+    )
+    parser.add_argument(
+        "--openai-compatible-base-url",
+        default=clean_env("OPENAI_COMPATIBLE_BASE_URL")
+        or clean_env("LOCAL_MODEL_BASE_URL")
+        or "http://127.0.0.1:8000/v1",
+    )
+    parser.add_argument(
+        "--openai-compatible-api-key-env",
+        default=clean_env("OPENAI_COMPATIBLE_API_KEY_ENV", "OPENAI_COMPATIBLE_API_KEY"),
+    )
     parser.add_argument(
         "--candidate-retriever",
         choices=["fusion", "hybrid", "embedding", "lexical", "bm25", "kg"],
@@ -119,7 +150,8 @@ def main() -> None:
     parser.add_argument("--embedding-device", default=DEFAULT_EMBEDDING_DEVICE)
     parser.add_argument("--embedding-batch-size", type=int, default=DEFAULT_EMBEDDING_BATCH_SIZE)
     parser.add_argument("--hybrid-alpha", type=float, default=0.7)
-    parser.add_argument("--kg-dir", default="outputs/kg")
+    parser.add_argument("--kg-dir", default=clean_env("RAG_KG_DIR", "outputs/graphrag"))
+    parser.add_argument("--graph-rag-dir", default=clean_env("RAG_GRAPHRAG_DIR", "outputs/graphrag"))
     parser.add_argument("--text-index-dir", default="outputs/text_index")
     parser.add_argument("--visual-index-dir", default="outputs/visual_index")
     parser.add_argument(
@@ -138,7 +170,8 @@ def main() -> None:
         default=clean_env("RAG_RERANK_METHODS", "G0,G1,G2,G3,G4"),
         help="Comma-separated rerank methods written by scripts/04_rerank.py.",
     )
-    parser.add_argument("--skip-kg", action="store_true")
+    parser.add_argument("--skip-graphrag", action="store_true")
+    parser.add_argument("--skip-kg", action="store_true", help="Backward-compatible alias for --skip-graphrag.")
     args = parser.parse_args()
     rerank_k = args.rerank_k if args.rerank_k is not None else args.top_k
     candidate_retriever = args.retriever or args.candidate_retriever
@@ -220,6 +253,36 @@ def main() -> None:
                         str(args.visual_max_captions),
                     ]
                 )
+            elif args.visual_caption_provider == "xinference":
+                visual_step.extend(
+                    [
+                        "--caption-provider",
+                        "xinference",
+                        "--xinference-model",
+                        args.visual_caption_model or args.xinference_vision_model,
+                        "--xinference-base-url",
+                        args.xinference_base_url,
+                        "--xinference-api-key-env",
+                        args.xinference_api_key_env,
+                        "--max-captions",
+                        str(args.visual_max_captions),
+                    ]
+                )
+            elif args.visual_caption_provider == "openai_compatible":
+                visual_step.extend(
+                    [
+                        "--caption-provider",
+                        "openai_compatible",
+                        "--openai-compatible-model",
+                        args.visual_caption_model or args.openai_compatible_vision_model,
+                        "--openai-compatible-base-url",
+                        args.openai_compatible_base_url,
+                        "--openai-compatible-api-key-env",
+                        args.openai_compatible_api_key_env,
+                        "--max-captions",
+                        str(args.visual_max_captions),
+                    ]
+                )
             elif args.visual_caption_model:
                 visual_step.extend(
                     [
@@ -236,21 +299,29 @@ def main() -> None:
             run_step(visual_step)
         run_step([py, "scripts/02_build_graph.py", "--nodes", nodes, "--output", edges])
 
-    if not args.skip_kg:
+    if not (args.skip_graphrag or args.skip_kg):
         run_step(
             [
                 py,
-                "scripts/23_build_datafountain_kg.py",
+                "scripts/23_build_graphrag.py",
                 "--nodes",
                 nodes,
-                "--kg-dir",
-                args.kg_dir,
-                "--text-dir",
-                args.text_index_dir,
-                "--visual-dir",
-                args.visual_index_dir,
+                "--edges",
+                edges,
+                "--output-dir",
+                args.graph_rag_dir,
             ]
         )
+
+    kg_dir = args.kg_dir or args.graph_rag_dir
+    if kg_dir == "outputs/graphrag":
+        kg_dir = args.graph_rag_dir
+
+    if args.skip_graphrag or args.skip_kg:
+        kg_dir = args.kg_dir
+
+    if not kg_index_exists(kg_dir):
+        kg_dir = args.graph_rag_dir
 
     retrieve_step = [
         py,
@@ -274,7 +345,7 @@ def main() -> None:
         "--hybrid-alpha",
         str(args.hybrid_alpha),
         "--kg-dir",
-        args.kg_dir,
+        kg_dir,
     ]
     rerank_step = [
         py,
@@ -300,7 +371,7 @@ def main() -> None:
         "--hybrid-alpha",
         str(args.hybrid_alpha),
         "--kg-dir",
-        args.kg_dir,
+        kg_dir,
         "--methods",
         args.rerank_methods,
     ]
@@ -311,7 +382,18 @@ def main() -> None:
     run_step(rerank_step)
     run_step([py, "scripts/05_evaluate.py", "--questions", questions])
     run_step([py, "scripts/08_compare_methods.py", "--questions", questions])
-    run_step([py, "scripts/09_build_evidence_chains.py", "--questions", questions])
+    run_step(
+        [
+            py,
+            "scripts/09_build_evidence_chains.py",
+            "--questions",
+            questions,
+            "--nodes",
+            nodes,
+            "--edges",
+            edges,
+        ]
+    )
     run_step([py, "scripts/11_build_evidence_cards.py", "--questions", questions])
     run_step([py, "scripts/12_check_evidence_cards.py", "--questions", questions])
 

@@ -34,7 +34,7 @@ TYPE_WEIGHTS = {
 
 DEFAULT_MODALITIES = ["text", "table", "figure", "page", "caption"]
 RETRIEVER_CHOICES = ["fusion", "hybrid", "embedding", "lexical", "bm25", "kg"]
-DEFAULT_KG_DIR = os.getenv("RAG_KG_DIR", "outputs/kg")
+DEFAULT_KG_DIR = os.getenv("RAG_KG_DIR", "outputs/graphrag")
 
 _CORPUS_FEATURE_CACHE: dict[tuple[str, ...], dict[str, Any]] = {}
 _GRAPH_BUILD_CACHE: dict[tuple[int, int, int, int], nx.Graph] = {}
@@ -129,6 +129,70 @@ VISUAL_QUESTION_TYPE_TERMS = (
     "\u56fe\u6587\u4e00\u81f4\u6027",
     "\u56fe\u8868\u7406\u89e3",
     "\u8de8\u6a21\u6001\u7efc\u5408",
+)
+STRUCTURED_TABLE_QA_TYPE_TERMS = (
+    "text_table_rag",
+    "table_qa",
+    "tat_qa",
+    "tat-qa",
+    "finqa",
+    "financial_table",
+    "structured_table",
+)
+STRUCTURED_TABLE_QA_QUERY_TERMS = (
+    "percentage",
+    "percent",
+    "growth",
+    "change",
+    "fiscal",
+    "annual",
+    "10-k",
+    "income",
+    "revenue",
+    "sales",
+    "debt",
+    "liabilities",
+    "assets",
+    "cash flow",
+    "net sales",
+    "operating profit",
+    "gross margin",
+    "inventory",
+    "obligations",
+    "million",
+    "billion",
+)
+MULTIHOP_QTYPE_TERMS = (
+    "comparison_query",
+    "inference_query",
+    "temporal_query",
+    "null_query",
+    "multi_hop",
+    "multihop",
+    "multi-hop",
+)
+MULTIHOP_QUERY_TERMS = (
+    "compare",
+    "comparison",
+    "both",
+    "shared",
+    "common",
+    "between",
+    "relationship",
+    "difference",
+    "earlier",
+    "later",
+    "before",
+    "after",
+    "temporal",
+    "infer",
+    "inference",
+    "\u6bd4\u8f83",
+    "\u5173\u7cfb",
+    "\u5171\u540c",
+    "\u4e4b\u95f4",
+    "\u63a8\u65ad",
+    "\u5148\u540e",
 )
 
 AFTER_SALES_INTENT_TERMS = {
@@ -570,9 +634,25 @@ def _embedding_scores_safe(
     embedding_cache: str,
     embedding_device: str,
     embedding_batch_size: int,
+    precomputed_embedding_scores: dict[str, float] | None = None,
 ) -> dict[str, float]:
+    if precomputed_embedding_scores is not None:
+        return {
+            clean_text(node.get("node_id")): precomputed_embedding_scores.get(clean_text(node.get("node_id")), 0.0)
+            for node in nodes
+            if clean_text(node.get("node_id"))
+        }
     if embedding_index is None:
-        return {}
+        try:
+            embedding_index = EmbeddingIndex.from_nodes(
+                nodes,
+                model_name=embedding_model,
+                cache_dir=embedding_cache,
+                device=embedding_device,
+                batch_size=embedding_batch_size,
+            )
+        except Exception:
+            return {}
     try:
         return embedding_index.score(question.get("question", ""), nodes)
     except Exception:
@@ -707,6 +787,8 @@ def question_route_profile(question: dict[str, Any]) -> dict[str, Any]:
             primary = "manual_visual" if intent["visual"] else "manual"
         else:
             primary = "after_sales"
+    elif is_structured_table_reasoning(question):
+        primary = "structured_table"
     elif intent["table"] or intent["figure"] or intent["cross"] or intent["location"]:
         primary = "visual"
     elif intent["text_fact"]:
@@ -725,11 +807,11 @@ def kg_fusion_route_weight(question: dict[str, Any], kg_index: dict[str, Any] | 
     if not context["entities"]:
         return 0.0
     if context["policies"] and not context["concrete"] and not context["actions"]:
-        return 0.42
+        return 0.04
     if context["concrete"] and (context["actions"] or context["policies"]):
-        return 0.72
+        return 0.07
     if context["concrete"]:
-        return 0.45
+        return 0.05
     return 0.0
 
 
@@ -740,41 +822,52 @@ def route_weights_for_question(
 ) -> dict[str, float]:
     intent = question_intent(question)
     profile = question_route_profile(question)
+    structured_table = is_structured_table_reasoning(question)
     weights = {
         "lexical": 1.12,
-        "bm25": 1.28,
-        "embedding": 0.9,
+        "bm25": 1.7,
+        "embedding": 0.7,
         "product": 0.8 if matched_product_groups(question) else 0.0,
-        "kg": min(0.22, kg_fusion_route_weight(question, kg_index)),
-        "section": 0.55,
+        "kg": min(0.04, kg_fusion_route_weight(question, kg_index)),
+        "section": 0.38,
         "reference": 0.95 if extract_document_refs(question.get("question", "")) else 0.35,
-        "visual": 0.18,
-        "layout": 0.08,
+        "visual": 0.12,
+        "layout": 0.05,
     }
     primary = profile["primary"]
     if primary == "policy":
-        weights["lexical"] = 1.05
-        weights["bm25"] = 1.25
-        weights["embedding"] = 0.85
+        weights["lexical"] = 1.08
+        weights["bm25"] = 1.58
+        weights["embedding"] = 0.68
         weights["product"] = 0.0
         weights["section"] = 0.9
         weights["visual"] = 0.08
         weights["layout"] = 0.05
     elif primary in {"manual", "troubleshooting"}:
         weights["lexical"] = 1.16
-        weights["bm25"] = 1.34
-        weights["embedding"] = 0.88
+        weights["bm25"] = 1.78
+        weights["embedding"] = 0.72
         weights["product"] = max(weights["product"], 0.55 if profile["has_product"] else 0.18)
         weights["section"] = 0.62
         weights["visual"] = max(weights["visual"], 0.28)
     elif primary == "manual_visual":
         weights["lexical"] = 1.08
-        weights["bm25"] = 1.22
-        weights["embedding"] = 0.86
+        weights["bm25"] = 1.5
+        weights["embedding"] = 0.68
         weights["visual"] = 0.55
         weights["layout"] = 0.22
         weights["reference"] = max(weights["reference"], 0.65)
         weights["section"] = 0.62
+    elif primary == "structured_table":
+        weights["lexical"] = 1.2
+        weights["bm25"] = 2.05
+        weights["embedding"] = 0.88
+        weights["product"] = 0.0
+        weights["kg"] = 0.0
+        weights["section"] = 0.18
+        weights["reference"] = 0.3 if extract_document_refs(question.get("question", "")) else 0.12
+        weights["visual"] = 0.06
+        weights["layout"] = 0.0
     elif primary == "visual":
         weights["visual"] = 0.7
         weights["layout"] = max(weights["layout"], 0.28)
@@ -782,23 +875,57 @@ def route_weights_for_question(
     elif primary == "text_fact":
         weights["visual"] *= 0.25
         weights["layout"] *= 0.3
-        weights["bm25"] = max(weights["bm25"], 1.18)
-    if intent["table"] or intent["figure"]:
+        weights["bm25"] = max(weights["bm25"], 1.85)
+        weights["embedding"] = min(weights["embedding"], 0.62)
+    if (intent["table"] or intent["figure"]) and not structured_table:
         weights["visual"] = max(weights["visual"], 0.62)
         weights["reference"] = max(weights["reference"], 0.8)
-    if intent["cross"]:
+    if intent["cross"] and not structured_table:
         weights["visual"] = max(weights["visual"], 0.55)
         weights["section"] = max(weights["section"], 0.62)
-    if intent["location"]:
+    if intent["location"] and not structured_table:
         weights["layout"] = 0.4
     if intent["text_fact"]:
         weights["visual"] *= 0.35
         weights["layout"] *= 0.4
+    if structured_table:
+        weights["visual"] = min(weights["visual"], 0.06)
+        weights["layout"] = 0.0
+        weights["kg"] = 0.0
     return {route: weights.get(route, 0.5) for route in available_routes}
+
+
+def anchor_fusion_to_bm25(
+    question: dict[str, Any],
+    route_scores: dict[str, dict[str, float]],
+    fused_scores: dict[str, float],
+    node_ids: list[str],
+) -> dict[str, float]:
+    bm25_scores = route_scores.get("bm25")
+    if not bm25_scores:
+        return fused_scores
+    intent = question_intent(question)
+    anchor = 0.38
+    if is_structured_table_reasoning(question):
+        anchor = 0.54
+    elif intent["text_fact"]:
+        anchor = 0.46
+    elif intent["table"] or intent["figure"] or intent["location"]:
+        anchor = 0.12
+    elif intent["cross"]:
+        anchor = 0.30
+    bm25_norm = normalize_scores(bm25_scores, node_ids)
+    fused_norm = normalize_scores(fused_scores, node_ids)
+    anchored = {
+        node_id: (1.0 - anchor) * fused_norm.get(node_id, 0.0) + anchor * bm25_norm.get(node_id, 0.0)
+        for node_id in node_ids
+    }
+    return normalize_scores(anchored, node_ids)
 
 
 def node_answer_prior(question: dict[str, Any], node: dict[str, Any]) -> float:
     intent = question_intent(question)
+    structured_table = is_structured_table_reasoning(question)
     node_id = clean_text(node.get("node_id"))
     node_type = clean_text(node.get("node_type")) or "text"
     structure_type = clean_text(node.get("structure_type"))
@@ -812,7 +939,14 @@ def node_answer_prior(question: dict[str, Any], node: dict[str, Any]) -> float:
     elif node_type == "text":
         prior *= 1.08
     elif node_type in VISUAL_NODE_TYPES:
-        if intent["table"] or intent["figure"] or intent["location"] or intent["cross"]:
+        if structured_table:
+            if node_type == "table":
+                prior *= 1.08
+            elif node_type == "caption":
+                prior *= 0.86
+            else:
+                prior *= 0.66
+        elif intent["table"] or intent["figure"] or intent["location"] or intent["cross"]:
             prior *= 1.02 if node_has_visual_caption(node) else 0.92
         else:
             prior *= 0.72
@@ -832,6 +966,41 @@ def apply_node_answer_priors(
         if node_id:
             adjusted[node_id] = scores.get(node_id, 0.0) * node_answer_prior(question, node)
     return normalize_scores(adjusted, list(adjusted))
+
+
+def structured_table_group_key(node_id: str) -> str:
+    return re.sub(r"_(?:table|text|caption|figure|page)$", "", clean_text(node_id), flags=re.I)
+
+
+def smooth_structured_table_pairs(
+    question: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    scores: dict[str, float],
+) -> dict[str, float]:
+    if not is_structured_table_reasoning(question):
+        return scores
+    node_ids = [clean_text(node.get("node_id")) for node in nodes if clean_text(node.get("node_id"))]
+    if not node_ids:
+        return scores
+    normalized = normalize_scores(scores, node_ids)
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for node in nodes:
+        node_id = clean_text(node.get("node_id"))
+        if node_id:
+            groups[structured_table_group_key(node_id)].append(node)
+    adjusted = dict(normalized)
+    for group_nodes in groups.values():
+        if len(group_nodes) < 2:
+            continue
+        group_types = {clean_text(node.get("node_type")) for node in group_nodes}
+        group_ids = [clean_text(node.get("node_id")) for node in group_nodes if clean_text(node.get("node_id"))]
+        if not ({"table", "text"} <= group_types) or not group_ids:
+            continue
+        best = max(normalized.get(node_id, 0.0) for node_id in group_ids)
+        for node_id in group_ids:
+            current = normalized.get(node_id, 0.0)
+            adjusted[node_id] = max(current, 0.72 * current + 0.28 * best)
+    return normalize_scores(adjusted, node_ids)
 
 
 def rrf_fuse_scores(
@@ -864,6 +1033,7 @@ def fusion_scores(
     embedding_device: str = DEFAULT_EMBEDDING_DEVICE,
     embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
     kg_index: dict[str, Any] | None = None,
+    precomputed_embedding_scores: dict[str, float] | None = None,
 ) -> dict[str, float]:
     nodes = _scorable_nodes(nodes)
     node_ids = list(_corpus_feature(nodes)["node_ids"])
@@ -887,6 +1057,7 @@ def fusion_scores(
         embedding_cache,
         embedding_device,
         embedding_batch_size,
+        precomputed_embedding_scores=precomputed_embedding_scores,
     )
     if embedding_scores:
         route_scores["embedding"] = embedding_scores
@@ -898,7 +1069,9 @@ def fusion_scores(
     if not route_scores:
         return {node_id: 0.0 for node_id in node_ids}
     fused = rrf_fuse_scores(route_scores, node_ids, route_weights_for_question(question, route_scores, kg_index))
-    return apply_node_answer_priors(question, nodes, fused)
+    fused = anchor_fusion_to_bm25(question, route_scores, fused, node_ids)
+    fused = apply_node_answer_priors(question, nodes, fused)
+    return smooth_structured_table_pairs(question, nodes, fused)
 
 
 def similarity_scores(
@@ -912,6 +1085,7 @@ def similarity_scores(
     embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
     hybrid_alpha: float = 0.7,
     kg_index: dict[str, Any] | None = None,
+    precomputed_embedding_scores: dict[str, float] | None = None,
 ) -> dict[str, float]:
     nodes = _scorable_nodes(nodes)
     if not nodes:
@@ -928,20 +1102,23 @@ def similarity_scores(
             embedding_device=embedding_device,
             embedding_batch_size=embedding_batch_size,
             kg_index=kg_index,
+            precomputed_embedding_scores=precomputed_embedding_scores,
         )
     if retriever == "bm25":
         return _bm25_scores_from_cached_texts(question.get("question", ""), nodes, "retrieval")
     if retriever == "kg":
         return kg_route_scores(question, nodes, kg_index)
     if retriever in {"embedding", "hybrid"}:
-        index = embedding_index or EmbeddingIndex.from_nodes(
+        embedding_scores = _embedding_scores_safe(
+            question,
             nodes,
-            model_name=embedding_model,
-            cache_dir=embedding_cache,
-            device=embedding_device,
-            batch_size=embedding_batch_size,
+            embedding_index,
+            embedding_model,
+            embedding_cache,
+            embedding_device,
+            embedding_batch_size,
+            precomputed_embedding_scores=precomputed_embedding_scores,
         )
-        embedding_scores = index.score(question.get("question", ""), nodes)
         if retriever == "embedding":
             return embedding_scores
         lexical_scores = _scores_from_cached_texts(question.get("question", ""), nodes, "retrieval")
@@ -1378,6 +1555,117 @@ def question_intent(question: dict[str, Any]) -> dict[str, bool]:
     }
 
 
+def is_structured_table_reasoning(question: dict[str, Any]) -> bool:
+    qtype = clean_text(question.get("question_type")).casefold()
+    query = clean_text(question.get("question")).casefold()
+    blob = f"{qtype} {query}"
+    if any(term in qtype for term in STRUCTURED_TABLE_QA_TYPE_TERMS):
+        return True
+    tableish = "table" in blob or "tabular" in blob or "as reported" in blob or "financial report" in blob
+    numericish = bool(re.search(r"\b(?:19|20)\d{2}\b|[$%]|\b\d+(?:\.\d+)?\b", query))
+    financeish = any(term in query for term in STRUCTURED_TABLE_QA_QUERY_TERMS)
+    return bool(tableish and numericish and financeish)
+
+
+def is_multihop_reasoning(question: dict[str, Any]) -> bool:
+    qtype = clean_text(question.get("question_type")).casefold()
+    query = clean_text(question.get("question")).casefold()
+    if any(term in qtype for term in MULTIHOP_QTYPE_TERMS):
+        return True
+    hits = sum(1 for term in MULTIHOP_QUERY_TERMS if term in query)
+    entity_like = len(re.findall(r"\b[A-Z][A-Za-z0-9&.'-]{2,}\b", clean_text(question.get("question"))))
+    return bool(hits >= 2 or (hits >= 1 and entity_like >= 2))
+
+
+def adaptive_rag_route(question: dict[str, Any]) -> str:
+    intent = question_intent(question)
+    if is_structured_table_reasoning(question):
+        return "structured_table"
+    if is_multihop_reasoning(question):
+        return "multihop_graph"
+    if is_after_sales_question(question):
+        return "after_sales_visual" if intent["visual"] else "after_sales_policy"
+    if intent["cross"]:
+        return "cross_modal"
+    if intent["table"] or intent["figure"] or intent["location"]:
+        return "visual_grounding"
+    if intent["text_fact"]:
+        return "text_fact"
+    return "general_text"
+
+
+def adaptive_g4_profile(question: dict[str, Any]) -> dict[str, float | str]:
+    route = adaptive_rag_route(question)
+    profile: dict[str, float | str] = {
+        "route": route,
+        "retrieval_anchor": 0.12,
+        "visual_min": 0.0,
+        "visual_max": 0.12,
+        "chain_min": 0.0,
+        "chain_max": 0.14,
+        "domain_min": 0.0,
+        "product_min": 0.0,
+        "kg_min": 0.0,
+        "kg_max": 0.08,
+        "model_max": 0.16,
+    }
+    if route == "structured_table":
+        profile.update(
+            {
+                "retrieval_anchor": 0.30,
+                "visual_max": 0.0,
+                "chain_min": 0.02,
+                "chain_max": 0.04,
+                "kg_max": 0.0,
+                "model_max": 0.08,
+            }
+        )
+    elif route == "multihop_graph":
+        profile.update(
+            {
+                "retrieval_anchor": 0.08,
+                "chain_min": 0.10,
+                "chain_max": 0.16,
+                "kg_min": 0.02,
+                "kg_max": 0.08,
+                "visual_max": 0.03,
+            }
+        )
+    elif route in {"visual_grounding", "cross_modal"}:
+        profile.update(
+            {
+                "retrieval_anchor": 0.05,
+                "visual_min": 0.08,
+                "visual_max": 0.14,
+                "chain_min": 0.08,
+                "chain_max": 0.14,
+                "kg_max": 0.04,
+            }
+        )
+    elif route.startswith("after_sales"):
+        profile.update(
+            {
+                "retrieval_anchor": 0.14,
+                "domain_min": 0.10,
+                "product_min": 0.04,
+                "kg_max": 0.06,
+                "chain_min": 0.08,
+                "chain_max": 0.12,
+            }
+        )
+    elif route == "text_fact":
+        profile.update(
+            {
+                "retrieval_anchor": 0.22,
+                "visual_max": 0.02,
+                "chain_max": 0.035,
+                "kg_max": 0.02,
+                "model_max": 0.08,
+            }
+        )
+    return profile
+
+
 def after_sales_intents(question: dict[str, Any]) -> dict[str, float]:
     blob = _question_blob(question)
     scores: dict[str, float] = {}
@@ -1385,6 +1673,11 @@ def after_sales_intents(question: dict[str, Any]) -> dict[str, float]:
         hits = sum(1 for term in terms if _term_in_text(term, blob))
         if hits:
             scores[intent] = min(1.0, 0.35 + 0.18 * hits)
+    manual_or_product_context = _contains_any(blob, AFTER_SALES_MANUAL_HINTS) or bool(matched_product_groups(question))
+    if not manual_or_product_context:
+        for generic_intent in ("usage_operation", "spec_parts"):
+            if set(scores) == {generic_intent}:
+                scores.pop(generic_intent, None)
     if not scores and _contains_any(blob, AFTER_SALES_MANUAL_HINTS):
         scores["general_after_sales"] = 0.45
     return scores
@@ -1475,6 +1768,8 @@ def node_has_visual_caption(node: dict[str, Any]) -> bool:
 
 def visual_signal_weight(question: dict[str, Any], visual_raw: dict[str, float]) -> float:
     if not any(score > 0 for score in visual_raw.values()):
+        return 0.0
+    if is_structured_table_reasoning(question):
         return 0.0
     intent = question_intent(question)
     if intent["text_fact"] and not (intent["table"] or intent["figure"] or intent["location"]):
@@ -1631,6 +1926,8 @@ def chain_signal_weight(question: dict[str, Any], chain_raw: dict[str, float]) -
     intent = question_intent(question)
     if is_after_sales_question(question):
         return 0.09
+    if is_structured_table_reasoning(question):
+        return 0.025
     if intent["cross"] or intent["table"] or intent["figure"]:
         return 0.08
     if intent["location"]:
@@ -1661,12 +1958,71 @@ def kg_signal_weight(question: dict[str, Any], kg_raw: dict[str, float], kg_inde
     if not context["entities"]:
         return 0.0
     if context["policies"] and not context["concrete"] and not context["actions"]:
-        return 0.025
+        return 0.012
     if context["concrete"] and (context["actions"] or context["policies"]):
-        return 0.045 if is_after_sales_question(question) else 0.055
+        return 0.018 if is_after_sales_question(question) else 0.024
     if context["concrete"]:
-        return 0.025 if is_after_sales_question(question) else 0.04
+        return 0.012 if is_after_sales_question(question) else 0.018
     return 0.0
+
+
+def _model_provider(value: str) -> str:
+    value = clean_text(value).lower()
+    if value in {"xinference"}:
+        return "xinference"
+    if value in {"openai_compatible", "openai-compatible", "local_openai", "local-server"}:
+        return "openai_compatible"
+    return ""
+
+
+def model_rerank_scores(
+    question: dict[str, Any],
+    nodes_by_id: dict[str, dict[str, Any]],
+    candidate_ids: list[str],
+) -> dict[str, float]:
+    if not candidate_ids:
+        return {}
+    try:
+        from ark_clients import XinferenceRerankClient, get_env, rerank_model_for_provider
+    except Exception:
+        return {node_id: 0.0 for node_id in candidate_ids}
+
+    provider = _model_provider(get_env("RAG_RERANK_PROVIDER") or get_env("RAG_MODEL_PROVIDER"))
+    if not provider:
+        return {node_id: 0.0 for node_id in candidate_ids}
+
+    enabled = clean_text(get_env("RAG_ENABLE_MODEL_RERANK", "1")).lower()
+    if enabled in {"0", "false", "no", "off"}:
+        return {node_id: 0.0 for node_id in candidate_ids}
+
+    model = rerank_model_for_provider(provider, get_env("RAG_RERANK_MODEL", ""))
+    if not model:
+        return {node_id: 0.0 for node_id in candidate_ids}
+
+    documents = [node_embedding_text(nodes_by_id.get(node_id, {}))[:3000] for node_id in candidate_ids]
+    try:
+        client = XinferenceRerankClient(provider=provider, model=model)
+        values = client.rerank(clean_text(question.get("question")), documents)
+    except Exception:
+        return {node_id: 0.0 for node_id in candidate_ids}
+    return {
+        node_id: max(0.0, float(values[index])) if index < len(values) else 0.0
+        for index, node_id in enumerate(candidate_ids)
+    }
+
+
+def model_rerank_signal_weight(model_rerank_raw: dict[str, float]) -> float:
+    if not any(score > 0 for score in model_rerank_raw.values()):
+        return 0.0
+    try:
+        from ark_clients import get_env
+
+        configured = get_env("RAG_MODEL_RERANK_WEIGHT", "")
+        if configured:
+            return max(0.0, min(0.22, float(configured)))
+    except Exception:
+        pass
+    return 0.08
 
 
 def _reference_weight(node_type: str, refs: set[tuple[str, str]]) -> float:
@@ -1757,6 +2113,7 @@ def reference_scores(
 def query_modality_profile(question: dict[str, Any]) -> dict[str, dict[str, float]]:
     qtype = clean_text(question.get("question_type"))
     query = clean_text(question.get("question")).lower()
+    structured_table = is_structured_table_reasoning(question)
 
     wants_table = "表格" in qtype or "table" in query or "表 " in query or "表" in query
     wants_figure = (
@@ -1773,6 +2130,19 @@ def query_modality_profile(question: dict[str, Any]) -> dict[str, dict[str, floa
 
     node_type_weights = {"text": 1.0, "caption": 0.8, "table": 0.5, "figure": 0.5, "page": 0.1}
     edge_type_weights = dict(BASE_EDGE_TYPE_WEIGHTS)
+
+    if structured_table:
+        node_type_weights.update({"text": 1.25, "table": 1.35, "caption": 0.35, "figure": 0.05, "page": 0.03})
+        edge_type_weights.update(
+            {
+                "text_ref_table": 0.8,
+                "table_caption": 0.55,
+                "same_page": 0.02,
+                "same_section": 0.05,
+                "chunk_sequence": 0.04,
+            }
+        )
+        return {"node_type_weights": node_type_weights, "edge_type_weights": edge_type_weights}
 
     if wants_table:
         node_type_weights.update({"table": 1.6, "caption": 1.1, "text": 0.9, "figure": 0.2, "page": 0.05})
@@ -1802,6 +2172,8 @@ def graph_signal_multipliers(question: dict[str, Any]) -> dict[str, float]:
     qtype = clean_text(question.get("question_type"))
     query = clean_text(question.get("question")).lower()
 
+    if is_structured_table_reasoning(question):
+        return {"ppr": 0.1, "bridge": 0.25}
     if "文本事实" in qtype or "证据定位" in qtype:
         return {"ppr": 0.0, "bridge": 0.0}
     if "表格" in qtype or "table" in query or "表" in query:
@@ -1821,6 +2193,8 @@ def reference_signal_multiplier(question: dict[str, Any]) -> float:
     qtype = clean_text(question.get("question_type"))
     query = clean_text(question.get("question")).lower()
 
+    if is_structured_table_reasoning(question):
+        return 0.8 if extract_document_refs(question.get("question", "")) else 0.0
     if "文本事实" in qtype or "证据定位" in qtype:
         return 0.0
     if "表格" in qtype or "table" in query or "表" in query:
@@ -1848,6 +2222,7 @@ def retrieve_candidates(
     embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
     hybrid_alpha: float = 0.7,
     kg_index: dict[str, Any] | None = None,
+    precomputed_embedding_scores: dict[str, float] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
     doc_id = clean_text(question.get("doc_id"))
     pool = _scorable_nodes(nodes)
@@ -1866,6 +2241,7 @@ def retrieve_candidates(
         embedding_batch_size=embedding_batch_size,
         hybrid_alpha=hybrid_alpha,
         kg_index=kg_index,
+        precomputed_embedding_scores=precomputed_embedding_scores,
     )
     ranked = sorted(pool, key=lambda node: score_by_id.get(node["node_id"], 0.0), reverse=True)
     return ranked[:top_k], score_by_id
@@ -1989,38 +2365,43 @@ def rank_question(
     embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
     hybrid_alpha: float = 0.7,
     kg_index: dict[str, Any] | None = None,
+    precomputed_embedding_scores: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     start = time.perf_counter()
     nodes_by_id = nodes_by_id_cached(nodes)
     graph = build_graph(nodes, edges)
-    doc_id = clean_text(question.get("doc_id"))
-    similarity_pool = _scorable_nodes(nodes)
-    if doc_id:
-        doc_nodes = [node for node in similarity_pool if clean_text(node.get("doc_id")) == doc_id]
-        if doc_nodes:
-            similarity_pool = doc_nodes
-    sim_scores = similarity_scores(
-        question,
-        similarity_pool,
-        retriever=retriever,
-        embedding_index=embedding_index,
-        embedding_model=embedding_model,
-        embedding_cache=embedding_cache,
-        embedding_device=embedding_device,
-        embedding_batch_size=embedding_batch_size,
-        hybrid_alpha=hybrid_alpha,
-        kg_index=kg_index,
-    )
 
     if candidate_rows:
         candidate_ids = [row["node_id"] for row in candidate_rows if row.get("node_id") in nodes_by_id]
         candidate_nodes = [nodes_by_id[node_id] for node_id in candidate_ids]
         original_scores = {
-            row["node_id"]: as_float(row.get("score") or row.get("sim_score"), sim_scores.get(row["node_id"], 0.0))
+            row["node_id"]: as_float(row.get("score") or row.get("sim_score"), 0.0)
             for row in candidate_rows
             if row.get("node_id") in nodes_by_id
         }
+        # Candidate generation already computed retrieval similarity over the full corpus.
+        # Reusing those scores avoids an expensive full-corpus fusion pass per question.
+        sim_scores = dict(original_scores)
     else:
+        doc_id = clean_text(question.get("doc_id"))
+        similarity_pool = _scorable_nodes(nodes)
+        if doc_id:
+            doc_nodes = [node for node in similarity_pool if clean_text(node.get("doc_id")) == doc_id]
+            if doc_nodes:
+                similarity_pool = doc_nodes
+        sim_scores = similarity_scores(
+            question,
+            similarity_pool,
+            retriever=retriever,
+            embedding_index=embedding_index,
+            embedding_model=embedding_model,
+            embedding_cache=embedding_cache,
+            embedding_device=embedding_device,
+            embedding_batch_size=embedding_batch_size,
+            hybrid_alpha=hybrid_alpha,
+            kg_index=kg_index,
+            precomputed_embedding_scores=precomputed_embedding_scores,
+        )
         candidate_nodes, candidate_scores = retrieve_candidates(
             question,
             nodes,
@@ -2033,6 +2414,7 @@ def rank_question(
             embedding_batch_size=embedding_batch_size,
             hybrid_alpha=hybrid_alpha,
             kg_index=kg_index,
+            precomputed_embedding_scores=precomputed_embedding_scores,
         )
         candidate_ids = [node["node_id"] for node in candidate_nodes]
         original_scores = {node_id: candidate_scores.get(node_id, sim_scores.get(node_id, 0.0)) for node_id in candidate_ids}
@@ -2056,6 +2438,8 @@ def rank_question(
     product_norm = normalize_scores(product_raw, candidate_ids)
     kg_raw = kg_route_scores(question, [nodes_by_id[node_id] for node_id in candidate_ids], kg_index)
     kg_norm = normalize_scores(kg_raw, candidate_ids)
+    model_rerank_raw = model_rerank_scores(question, nodes_by_id, candidate_ids)
+    model_rerank_norm = normalize_scores(model_rerank_raw, candidate_ids)
     original_norm = normalize_scores(original_scores, candidate_ids)
     graph_mix = graph_signal_multipliers(question)
     ppr_multiplier = max(0.0, min(1.0, graph_mix.get("ppr", 0.0)))
@@ -2082,8 +2466,29 @@ def rank_question(
     domain_weight = after_sales_signal_weight(question, domain_raw)
     product_weight = product_signal_weight(question, product_raw)
     kg_weight = kg_signal_weight(question, kg_raw, kg_index)
+    model_rerank_weight = model_rerank_signal_weight(model_rerank_raw)
+    adaptive_profile = adaptive_g4_profile(question)
+    adaptive_route = clean_text(adaptive_profile.get("route")) or "general_text"
+    visual_weight = min(
+        as_float(adaptive_profile.get("visual_max"), visual_weight),
+        max(as_float(adaptive_profile.get("visual_min"), 0.0), visual_weight),
+    )
+    chain_weight = min(
+        as_float(adaptive_profile.get("chain_max"), chain_weight),
+        max(as_float(adaptive_profile.get("chain_min"), 0.0), chain_weight),
+    )
+    if any(score > 0 for score in domain_raw.values()):
+        domain_weight = max(as_float(adaptive_profile.get("domain_min"), 0.0), domain_weight)
+    if any(score > 0 for score in product_raw.values()):
+        product_weight = max(as_float(adaptive_profile.get("product_min"), 0.0), product_weight)
+    kg_weight = min(
+        as_float(adaptive_profile.get("kg_max"), kg_weight),
+        max(as_float(adaptive_profile.get("kg_min"), 0.0), kg_weight) if any(score > 0 for score in kg_raw.values()) else kg_weight,
+    )
+    model_rerank_weight = min(as_float(adaptive_profile.get("model_max"), model_rerank_weight), model_rerank_weight)
     g4_scores: dict[str, float] = {}
     domain_blend = min(0.22, domain_weight * 2.0) if domain_weight > 0 else 0.0
+    retrieval_anchor = max(0.0, min(0.4, as_float(adaptive_profile.get("retrieval_anchor"), 0.12)))
     for node_id in candidate_ids:
         base = g3_scores.get(node_id, 0.0)
         remaining = max(0.05, 1.0 - base)
@@ -2094,7 +2499,9 @@ def rank_question(
             + domain_weight * domain_norm.get(node_id, 0.0) * remaining
             + product_weight * product_norm.get(node_id, 0.0) * remaining
             + kg_weight * kg_norm.get(node_id, 0.0) * remaining
+            + model_rerank_weight * model_rerank_norm.get(node_id, 0.0) * remaining
         )
+        raw_score = (1.0 - retrieval_anchor) * raw_score + retrieval_anchor * original_norm.get(node_id, 0.0)
         if domain_blend:
             raw_score = (1.0 - domain_blend) * raw_score + domain_blend * domain_norm.get(node_id, 0.0)
         g4_scores[node_id] = min(
@@ -2157,9 +2564,13 @@ def rank_question(
                     "chain_score": round(chain_norm.get(node_id, 0.0), 6),
                     "domain_score": round(domain_norm.get(node_id, 0.0), 6),
                     "kg_score": round(kg_norm.get(node_id, 0.0), 6),
+                    "model_rerank_score": round(model_rerank_norm.get(node_id, 0.0), 6),
+                    "adaptive_route": adaptive_route,
                     "rerank_profile": (
+                        f"route={adaptive_route};anchor={retrieval_anchor:.3f};"
                         f"visual={visual_weight:.3f};chain={chain_weight:.3f};"
-                        f"after_sales={domain_weight:.3f};product={product_weight:.3f};kg={kg_weight:.3f}"
+                        f"after_sales={domain_weight:.3f};product={product_weight:.3f};"
+                        f"kg={kg_weight:.3f};model_rerank={model_rerank_weight:.3f}"
                     ),
                     "has_visual_crop": int(node_has_visual_crop(node)),
                     "has_visual_caption": int(node_has_visual_caption(node)),
@@ -2254,20 +2665,15 @@ def answer_for_question(question: dict[str, Any], top_rows: list[dict[str, Any]]
         return _fallback_answer_for_question(question, top_rows)
 
     try:
-        from ark_clients import ArkChatClient, ArkError, get_env
+        from ark_clients import ArkError, ModelClientError, answer_model_for_provider, create_chat_client, get_env
 
-        provider = (os.getenv("RAG_ANSWER_PROVIDER", "").strip() or get_env("RAG_ANSWER_PROVIDER", "ark")).lower()
+        provider = (get_env("RAG_ANSWER_PROVIDER") or get_env("RAG_MODEL_PROVIDER", "ark")).strip().lower()
         if provider in {"", "off", "none", "local", "fallback"}:
             return _fallback_answer_for_question(question, top_rows)
-        model = (
-            get_env("RAG_ANSWER_MODEL", "")
-            or get_env("ARK_TEXT_MODEL_PRO")
-            or get_env("ARK_TEXT_MODEL")
-            or get_env("ARK_MODEL")
-        )
+        model = answer_model_for_provider(provider, get_env("RAG_ANSWER_MODEL", ""))
         if not model:
             return _fallback_answer_for_question(question, top_rows)
-        chat = ArkChatClient(model=model)
+        chat = create_chat_client(provider, model=model)
         language_rule = "Answer in English." if is_mostly_english(question.get("question", "")) else "请用中文回答。"
         system_prompt = (
             "You are the final answer generator in a multimodal RAG evidence system. "
@@ -2294,11 +2700,11 @@ Requirements:
                     chat.complete(
                         system_prompt,
                         user_prompt,
-                        temperature=float(os.getenv("RAG_ANSWER_TEMPERATURE", "0.12")),
-                        max_tokens=int(os.getenv("RAG_ANSWER_MAX_TOKENS", "700")),
+                        temperature=float(get_env("RAG_ANSWER_TEMPERATURE", "0.12")),
+                        max_tokens=int(get_env("RAG_ANSWER_MAX_TOKENS", "700")),
                     )
                 )
-            except (ArkError, Exception) as exc:
+            except (ArkError, ModelClientError, Exception) as exc:
                 last_error = exc
                 if attempt < 2:
                     time.sleep(1.5 * (attempt + 1))

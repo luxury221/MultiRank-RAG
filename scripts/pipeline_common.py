@@ -55,6 +55,7 @@ def ensure_project_dirs() -> None:
         OUTPUT_DIR / "rankings",
         OUTPUT_DIR / "metrics",
         OUTPUT_DIR / "evidence_cards",
+        OUTPUT_DIR / "graphrag",
         OUTPUT_DIR / "cases",
         ROOT / "docs",
         ROOT / "demo",

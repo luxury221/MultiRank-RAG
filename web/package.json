@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "dev": "vite --host 127.0.0.1"
+    "dev": "vite --host 127.0.0.1 --configLoader native"
   },
   "dependencies": {
     "lucide-react": "0.487.0",

@@ -46,6 +46,8 @@ RANKING_FIELDS = [
     "chain_score",
     "domain_score",
     "kg_score",
+    "model_rerank_score",
+    "adaptive_route",
     "rerank_profile",
     "has_visual_crop",
     "has_visual_caption",
@@ -102,7 +104,11 @@ def main() -> None:
     parser.add_argument("--embedding-device", default=DEFAULT_EMBEDDING_DEVICE)
     parser.add_argument("--embedding-batch-size", type=int, default=DEFAULT_EMBEDDING_BATCH_SIZE)
     parser.add_argument("--hybrid-alpha", type=float, default=0.7, help="Embedding weight for --retriever hybrid.")
-    parser.add_argument("--kg-dir", default="outputs/kg", help="KG-lite directory. Empty string disables KG scoring.")
+    parser.add_argument(
+        "--kg-dir",
+        default=os.getenv("RAG_KG_DIR", "outputs/graphrag"),
+        help="GraphRAG/KG directory. Empty string disables graph scoring.",
+    )
     parser.add_argument("--routes", default="", help="Optional DataFountain question route CSV for product-aware query expansion.")
     parser.add_argument("--expand-query", action="store_true", help="Append product route aliases to reranking queries.")
     parser.add_argument(

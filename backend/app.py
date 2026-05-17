@@ -144,19 +144,19 @@ def candidate_rows_for_question(
     embedding_index: EmbeddingIndex | None = None,
     kg_index: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    candidate_k = int(os.getenv("RAG_BACKEND_CANDIDATE_K", "50"))
-    retriever = os.getenv("RAG_BACKEND_CANDIDATE_RETRIEVER", "fusion")
+    candidate_k = int(env_value("RAG_BACKEND_CANDIDATE_K", "50"))
+    retriever = env_value("RAG_BACKEND_CANDIDATE_RETRIEVER", "fusion")
     candidates, scores = retrieve_candidates(
         question,
         nodes,
         top_k=candidate_k,
         retriever=retriever,
         embedding_index=embedding_index,
-        embedding_model=os.getenv("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
-        embedding_cache=os.getenv("RAG_BACKEND_EMBEDDING_CACHE", str((job or JOB_ROOT) / "embeddings")),
-        embedding_device=os.getenv("RAG_EMBEDDING_DEVICE", DEFAULT_EMBEDDING_DEVICE),
-        embedding_batch_size=int(os.getenv("RAG_EMBEDDING_BATCH_SIZE", str(DEFAULT_EMBEDDING_BATCH_SIZE))),
-        hybrid_alpha=float(os.getenv("RAG_BACKEND_HYBRID_ALPHA", "0.7")),
+        embedding_model=env_value("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
+        embedding_cache=env_value("RAG_BACKEND_EMBEDDING_CACHE", str((job or JOB_ROOT) / "embeddings")),
+        embedding_device=env_value("RAG_EMBEDDING_DEVICE", DEFAULT_EMBEDDING_DEVICE),
+        embedding_batch_size=int(env_value("RAG_EMBEDDING_BATCH_SIZE", str(DEFAULT_EMBEDDING_BATCH_SIZE))),
+        hybrid_alpha=float(env_value("RAG_BACKEND_HYBRID_ALPHA", "0.7")),
         kg_index=kg_index,
     )
     rows: list[dict[str, Any]] = []
@@ -173,7 +173,7 @@ def candidate_rows_for_question(
                 "page": node.get("page", ""),
                 "score": round(scores.get(node_id, 0.0), 6),
                 "retriever": retriever,
-                "embedding_model": os.getenv("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+                "embedding_model": env_value("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
                 if retriever in {"embedding", "hybrid", "fusion"}
                 else "",
                 "source_ref": node.get("source_ref", ""),
@@ -184,17 +184,19 @@ def candidate_rows_for_question(
 
 
 def build_embedding_index_for_backend(nodes: list[dict[str, Any]], job: Path) -> EmbeddingIndex | None:
-    retriever = os.getenv("RAG_BACKEND_RERANK_RETRIEVER", "fusion")
-    candidate_retriever = os.getenv("RAG_BACKEND_CANDIDATE_RETRIEVER", "fusion")
+    retriever = env_value("RAG_BACKEND_RERANK_RETRIEVER", "fusion")
+    candidate_retriever = env_value("RAG_BACKEND_CANDIDATE_RETRIEVER", "fusion")
     if retriever not in {"embedding", "hybrid", "fusion"} and candidate_retriever not in {"embedding", "hybrid", "fusion"}:
         return None
-    model = os.getenv("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
-    device = os.getenv("RAG_EMBEDDING_DEVICE", DEFAULT_EMBEDDING_DEVICE)
-    batch_size = int(os.getenv("RAG_EMBEDDING_BATCH_SIZE", str(DEFAULT_EMBEDDING_BATCH_SIZE)))
-    cache_dir = os.getenv("RAG_BACKEND_EMBEDDING_CACHE", str(job / "embeddings"))
+    model = env_value("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+    provider = env_value("RAG_EMBEDDING_PROVIDER", env_value("RAG_MODEL_PROVIDER", "auto"))
+    device = env_value("RAG_EMBEDDING_DEVICE", DEFAULT_EMBEDDING_DEVICE)
+    batch_size = int(env_value("RAG_EMBEDDING_BATCH_SIZE", str(DEFAULT_EMBEDDING_BATCH_SIZE)))
+    cache_dir = env_value("RAG_BACKEND_EMBEDDING_CACHE", str(job / "embeddings"))
     return EmbeddingIndex.from_nodes(
         nodes,
         model_name=model,
+        provider=provider,
         cache_dir=cache_dir,
         device=device,
         batch_size=batch_size,
@@ -206,24 +208,20 @@ def backend_kg_enabled() -> bool:
     return value not in {"0", "false", "no", "off"}
 
 
-def build_kg_index_for_backend(job_id: str, job: Path, nodes_path: Path) -> dict[str, Any]:
+def build_kg_index_for_backend(job_id: str, job: Path, nodes_path: Path, edges_path: Path) -> dict[str, Any]:
     if not backend_kg_enabled():
-        append_log(job_id, "KG-lite is disabled for this backend job.")
+        append_log(job_id, "GraphRAG is disabled for this backend job.")
         return {}
-    kg_dir = job / "kg"
-    text_index_dir = job / "text_index"
-    visual_index_dir = job / "visual_index"
+    kg_dir = job / "graphrag"
     cmd = [
         sys.executable,
-        str(SCRIPTS_DIR / "23_build_datafountain_kg.py"),
+        str(SCRIPTS_DIR / "23_build_graphrag.py"),
         "--nodes",
         str(nodes_path),
-        "--kg-dir",
+        "--edges",
+        str(edges_path),
+        "--output-dir",
         str(kg_dir),
-        "--text-dir",
-        str(text_index_dir),
-        "--visual-dir",
-        str(visual_index_dir),
     ]
     try:
         result = subprocess.run(
@@ -236,16 +234,16 @@ def build_kg_index_for_backend(job_id: str, job: Path, nodes_path: Path) -> dict
             timeout=180,
         )
     except Exception as exc:
-        append_log(job_id, f"KG-lite build failed: {exc}")
+        append_log(job_id, f"GraphRAG build failed: {exc}")
         return {}
     if result.returncode != 0:
         detail = clean_text(result.stderr or result.stdout)
-        append_log(job_id, f"KG-lite build failed: {preview(detail, 360)}")
+        append_log(job_id, f"GraphRAG build failed: {preview(detail, 360)}")
         return {}
     kg_index = load_kg_index(kg_dir)
     append_log(
         job_id,
-        f"KG-lite enabled: {len(kg_index.get('entities', {}))} entities, "
+        f"GraphRAG enabled: {len(kg_index.get('entities', {}))} entities, "
         f"{len(kg_index.get('relations', []))} relations.",
     )
     return kg_index
@@ -299,6 +297,7 @@ def normalize_ranking_for_frontend(job_id: str, rows: list[dict[str, Any]]) -> d
                 "ref_score": float(row.get("ref_score") or 0.0),
                 "visual_score": float(row.get("visual_score") or 0.0),
                 "kg_score": float(row.get("kg_score") or 0.0),
+                "model_rerank_score": float(row.get("model_rerank_score") or 0.0),
                 "rerank_profile": row.get("rerank_profile", ""),
                 "has_visual_crop": int(row.get("has_visual_crop") or 0),
                 "has_visual_caption": int(row.get("has_visual_caption") or 0),
@@ -331,7 +330,7 @@ def normalize_chunk_template(value: str) -> str:
     return value if value in {"auto", "general", "ai", "math", "finance", "medical"} else "auto"
 
 
-VISUAL_CAPTION_PROVIDERS = {"local", "qwen", "doubao"}
+VISUAL_CAPTION_PROVIDERS = {"local", "qwen", "doubao", "xinference", "openai_compatible"}
 
 
 def env_value(name: str, default: str = "") -> str:
@@ -365,6 +364,13 @@ def default_backend_visual_caption_provider() -> str:
     ).lower()
     if provider in VISUAL_CAPTION_PROVIDERS:
         return provider
+    model_provider = clean_text(env_value("RAG_MODEL_PROVIDER", "")).lower()
+    if model_provider == "xinference" and env_value("XINFERENCE_VISION_MODEL"):
+        return "xinference"
+    if model_provider in {"openai_compatible", "openai-compatible", "local_openai", "local-server"} and (
+        env_value("OPENAI_COMPATIBLE_VISION_MODEL") or env_value("LOCAL_VISION_MODEL")
+    ):
+        return "openai_compatible"
     return "qwen" if env_value("DASHSCOPE_API_KEY") else "local"
 
 
@@ -394,6 +400,37 @@ def build_backend_captioner(job_id: str):
             return captioner, "doubao"
         append_log(job_id, "Doubao visual caption is enabled but ARK_API_KEY or model is unavailable; using crops only.")
         return visual_evidence.VisualCaptioner(""), "local"
+    if provider == "xinference":
+        captioner = visual_evidence.QwenVisionCaptioner(
+            model_name=env_value("RAG_BACKEND_XINFERENCE_VISION_MODEL")
+            or env_value("XINFERENCE_VISION_MODEL")
+            or env_value("RAG_VISION_MODEL", ""),
+            base_url=env_value("XINFERENCE_BASE_URL", visual_evidence.XINFERENCE_DEFAULT_BASE_URL),
+            api_key_env=env_value("XINFERENCE_API_KEY_ENV", "XINFERENCE_API_KEY"),
+            timeout=env_float("XINFERENCE_TIMEOUT", 60.0),
+            allow_no_api_key=True,
+        )
+        if captioner.available() and captioner.model_name:
+            return captioner, "xinference"
+        append_log(job_id, "Xinference visual caption is enabled but no vision model is configured; using crops only.")
+        return visual_evidence.VisualCaptioner(""), "local"
+    if provider == "openai_compatible":
+        captioner = visual_evidence.QwenVisionCaptioner(
+            model_name=env_value("RAG_BACKEND_OPENAI_COMPATIBLE_VISION_MODEL")
+            or env_value("OPENAI_COMPATIBLE_VISION_MODEL")
+            or env_value("LOCAL_VISION_MODEL", ""),
+            base_url=env_value(
+                "OPENAI_COMPATIBLE_BASE_URL",
+                env_value("LOCAL_MODEL_BASE_URL", visual_evidence.OPENAI_COMPATIBLE_DEFAULT_BASE_URL),
+            ),
+            api_key_env=env_value("OPENAI_COMPATIBLE_API_KEY_ENV", "OPENAI_COMPATIBLE_API_KEY"),
+            timeout=env_float("OPENAI_COMPATIBLE_TIMEOUT", 60.0),
+            allow_no_api_key=True,
+        )
+        if captioner.available() and captioner.model_name:
+            return captioner, "openai_compatible"
+        append_log(job_id, "OpenAI-compatible visual caption is enabled but no vision model is configured; using crops only.")
+        return visual_evidence.VisualCaptioner(""), "local"
     caption_model = env_value("RAG_BACKEND_VISUAL_CAPTION_MODEL", "")
     caption_device = env_value("RAG_BACKEND_VISUAL_CAPTION_DEVICE", "auto")
     return visual_evidence.VisualCaptioner(caption_model, caption_device) if caption_model else visual_evidence.VisualCaptioner(""), "local"
@@ -419,23 +456,23 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
         }
         write_single_question(job, question)
 
-        parser_backend = os.getenv("RAG_PDF_PARSER", "mineru").strip().lower()
+        parser_backend = env_value("RAG_PDF_PARSER", "mineru").strip().lower()
         if parser_backend == "native":
             nodes = parse_pdf.pdf_to_nodes(
                 pdf_path,
-                chunk_size=int(os.getenv("RAG_BACKEND_CHUNK_SIZE", "900")),
-                chunk_template=chunk_template or os.getenv("RAG_BACKEND_CHUNK_TEMPLATE", "auto"),
+                chunk_size=int(env_value("RAG_BACKEND_CHUNK_SIZE", "900")),
+                chunk_template=chunk_template or env_value("RAG_BACKEND_CHUNK_TEMPLATE", "auto"),
             )
         else:
             nodes = parse_pdf.mineru_pdf_to_nodes(
                 pdf_path,
                 output_dir=job / "mineru",
-                chunk_size=int(os.getenv("RAG_BACKEND_CHUNK_SIZE", "900")),
-                chunk_template=chunk_template or os.getenv("RAG_BACKEND_CHUNK_TEMPLATE", "auto"),
-                backend=os.getenv("MINERU_BACKEND", "pipeline"),
-                method=os.getenv("MINERU_METHOD", "auto"),
-                lang=os.getenv("MINERU_LANG", ""),
-                api_url=os.getenv("MINERU_API_URL", ""),
+                chunk_size=int(env_value("RAG_BACKEND_CHUNK_SIZE", "900")),
+                chunk_template=chunk_template or env_value("RAG_BACKEND_CHUNK_TEMPLATE", "auto"),
+                backend=env_value("MINERU_BACKEND", "pipeline"),
+                method=env_value("MINERU_METHOD", "auto"),
+                lang=env_value("MINERU_LANG", ""),
+                api_url=env_value("MINERU_API_URL", ""),
             )
         write_jsonl(job / "nodes.raw.jsonl", nodes)
         chunk_report_rows = chunk_reporter.build_report(nodes)
@@ -479,8 +516,8 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
         write_jsonl(job / "edges.jsonl", edges)
 
         write_status(job_id, stage="kg", progress=46)
-        append_log(job_id, "Building KG-lite entity/relation index and visual index.")
-        kg_index = build_kg_index_for_backend(job_id, job, job / "nodes.jsonl")
+        append_log(job_id, "Building GraphRAG entity/relation/community index.")
+        kg_index = build_kg_index_for_backend(job_id, job, job / "nodes.jsonl", job / "edges.jsonl")
         write_status(
             job_id,
             kg_enabled=bool(kg_index),
@@ -496,20 +533,20 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
 
         write_status(job_id, stage="rerank", progress=70)
         append_log(job_id, "正在进行 G4 证据重排序")
-        rerank_retriever = os.getenv("RAG_BACKEND_RERANK_RETRIEVER", "fusion")
+        rerank_retriever = env_value("RAG_BACKEND_RERANK_RETRIEVER", "fusion")
         ranking_rows = rank_question(
             question,
             nodes,
             edges,
-            top_k=int(os.getenv("RAG_BACKEND_RERANK_K", "10")),
+            top_k=int(env_value("RAG_BACKEND_RERANK_K", "10")),
             candidate_rows=candidate_rows,
             retriever=rerank_retriever,
             embedding_index=embedding_index,
-            embedding_model=os.getenv("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
-            embedding_cache=os.getenv("RAG_BACKEND_EMBEDDING_CACHE", str(job / "embeddings")),
-            embedding_device=os.getenv("RAG_EMBEDDING_DEVICE", DEFAULT_EMBEDDING_DEVICE),
-            embedding_batch_size=int(os.getenv("RAG_EMBEDDING_BATCH_SIZE", str(DEFAULT_EMBEDDING_BATCH_SIZE))),
-            hybrid_alpha=float(os.getenv("RAG_BACKEND_HYBRID_ALPHA", "0.7")),
+            embedding_model=env_value("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
+            embedding_cache=env_value("RAG_BACKEND_EMBEDDING_CACHE", str(job / "embeddings")),
+            embedding_device=env_value("RAG_EMBEDDING_DEVICE", DEFAULT_EMBEDDING_DEVICE),
+            embedding_batch_size=int(env_value("RAG_EMBEDDING_BATCH_SIZE", str(DEFAULT_EMBEDDING_BATCH_SIZE))),
+            hybrid_alpha=float(env_value("RAG_BACKEND_HYBRID_ALPHA", "0.7")),
             kg_index=kg_index,
         )
         write_csv_dicts(job / "reranked.csv", ranking_rows)
@@ -524,7 +561,7 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
             g4_rows,
             nodes_by_id,
             graph,
-            max_steps=int(os.getenv("RAG_BACKEND_MAX_STEPS", "5")),
+            max_steps=int(env_value("RAG_BACKEND_MAX_STEPS", "5")),
         )
         write_csv_dicts(job / "chain_steps.csv", steps)
         question["answer"] = answer_for_question(question, steps or g4_rows)
@@ -533,7 +570,7 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
         append_log(job_id, "正在生成证据卡片")
         card_path = job / "evidence_card.png"
         if steps:
-            card_builder.build_card(question, steps, card_path, max_steps=int(os.getenv("RAG_BACKEND_MAX_STEPS", "5")))
+            card_builder.build_card(question, steps, card_path, max_steps=int(env_value("RAG_BACKEND_MAX_STEPS", "5")))
 
         normalized_steps = [normalize_step_for_frontend(job_id, step) for step in steps]
         card_url = rel_file_url(job_id, card_path) if card_path.exists() else ""

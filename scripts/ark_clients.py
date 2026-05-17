@@ -20,9 +20,43 @@ try:
 except ImportError:  # pragma: no cover - only used on Windows.
     winreg = None  # type: ignore[assignment]
 
+ROOT = Path(__file__).resolve().parents[1]
+_LOCAL_ENV_CACHE: dict[str, str] | None = None
+
 
 class ArkError(RuntimeError):
     pass
+
+
+class ModelClientError(RuntimeError):
+    pass
+
+
+def _load_local_env() -> dict[str, str]:
+    global _LOCAL_ENV_CACHE
+    if _LOCAL_ENV_CACHE is not None:
+        return _LOCAL_ENV_CACHE
+    values: dict[str, str] = {}
+    for path in (ROOT / ".env", ROOT / ".env.local"):
+        if not path.exists():
+            continue
+        for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            if key:
+                values[key] = value
+    _LOCAL_ENV_CACHE = values
+    return values
 
 
 def _windows_user_env(name: str) -> str:
@@ -37,7 +71,7 @@ def _windows_user_env(name: str) -> str:
 
 
 def get_env(name: str, default: str = "") -> str:
-    return os.environ.get(name, "").strip() or _windows_user_env(name) or default
+    return os.environ.get(name, "").strip() or _load_local_env().get(name, "").strip() or _windows_user_env(name) or default
 
 
 def ark_base_url() -> str:
@@ -49,6 +83,83 @@ def ark_api_key() -> str:
     if not key:
         raise ArkError("ARK_API_KEY is not configured.")
     return key
+
+
+def xinference_base_url() -> str:
+    return get_env("XINFERENCE_BASE_URL", "http://127.0.0.1:9997/v1").rstrip("/")
+
+
+def xinference_api_key() -> str:
+    return get_env("XINFERENCE_API_KEY", "not-used")
+
+
+def openai_compatible_base_url() -> str:
+    return (
+        get_env("OPENAI_COMPATIBLE_BASE_URL")
+        or get_env("LOCAL_MODEL_BASE_URL")
+        or get_env("LOCAL_OPENAI_BASE_URL")
+        or "http://127.0.0.1:8000/v1"
+    ).rstrip("/")
+
+
+def openai_compatible_api_key() -> str:
+    return (
+        get_env("OPENAI_COMPATIBLE_API_KEY")
+        or get_env("LOCAL_MODEL_API_KEY")
+        or get_env("LOCAL_OPENAI_API_KEY")
+        or "not-used"
+    )
+
+
+def provider_base_url(provider: str) -> str:
+    provider = provider.strip().lower()
+    if provider == "xinference":
+        return xinference_base_url()
+    if provider in {"openai_compatible", "openai-compatible", "local_openai", "local-server"}:
+        return openai_compatible_base_url()
+    return ark_base_url()
+
+
+def provider_api_key(provider: str) -> str:
+    provider = provider.strip().lower()
+    if provider == "xinference":
+        return xinference_api_key()
+    if provider in {"openai_compatible", "openai-compatible", "local_openai", "local-server"}:
+        return openai_compatible_api_key()
+    return ark_api_key()
+
+
+def answer_model_for_provider(provider: str, model: str | None = None) -> str:
+    provider = provider.strip().lower()
+    if model:
+        return model
+    if provider == "xinference":
+        return get_env("XINFERENCE_LLM_MODEL") or get_env("RAG_ANSWER_MODEL")
+    if provider in {"openai_compatible", "openai-compatible", "local_openai", "local-server"}:
+        return get_env("OPENAI_COMPATIBLE_LLM_MODEL") or get_env("LOCAL_LLM_MODEL") or get_env("RAG_ANSWER_MODEL")
+    return get_env("RAG_ANSWER_MODEL") or get_env("ARK_TEXT_MODEL_PRO") or get_env("ARK_TEXT_MODEL") or get_env("ARK_MODEL")
+
+
+def embedding_model_for_provider(provider: str, model: str | None = None) -> str:
+    provider = provider.strip().lower()
+    if model:
+        return model
+    if provider == "xinference":
+        return get_env("XINFERENCE_EMBEDDING_MODEL") or get_env("RAG_EMBEDDING_MODEL")
+    if provider in {"openai_compatible", "openai-compatible", "local_openai", "local-server"}:
+        return get_env("OPENAI_COMPATIBLE_EMBEDDING_MODEL") or get_env("LOCAL_EMBEDDING_MODEL") or get_env("RAG_EMBEDDING_MODEL")
+    return get_env("RAG_EMBEDDING_MODEL") or get_env("ARK_EMBEDDING_MODEL", "doubao-embedding-vision-250615")
+
+
+def rerank_model_for_provider(provider: str, model: str | None = None) -> str:
+    provider = provider.strip().lower()
+    if model:
+        return model
+    if provider == "xinference":
+        return get_env("XINFERENCE_RERANK_MODEL") or get_env("RAG_RERANK_MODEL")
+    if provider in {"openai_compatible", "openai-compatible", "local_openai", "local-server"}:
+        return get_env("OPENAI_COMPATIBLE_RERANK_MODEL") or get_env("LOCAL_RERANK_MODEL") or get_env("RAG_RERANK_MODEL")
+    return get_env("RAG_RERANK_MODEL")
 
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:
@@ -257,6 +368,143 @@ class ArkChatClient:
             max_tokens=max_tokens,
         )
         return (response.choices[0].message.content or "").strip()
+
+
+@dataclass
+class OpenAICompatibleChatClient:
+    provider: str = "xinference"
+    api_key: str | None = None
+    base_url: str | None = None
+    model: str | None = None
+    timeout_seconds: int = 120
+
+    def __post_init__(self) -> None:
+        self.base_url = (self.base_url or provider_base_url(self.provider)).rstrip("/")
+        self.api_key = self.api_key or provider_api_key(self.provider)
+        self.model = answer_model_for_provider(self.provider, self.model)
+        if not self.model:
+            raise ModelClientError(f"No chat model configured for provider={self.provider}.")
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise ModelClientError("The openai package is required for OpenAI-compatible chat calls.") from exc
+        self._client = OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=self.timeout_seconds)
+
+    def complete(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.1,
+        max_tokens: int = 420,
+    ) -> str:
+        response = self._client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return (response.choices[0].message.content or "").strip()
+
+
+@dataclass
+class OpenAICompatibleEmbedder:
+    provider: str = "xinference"
+    api_key: str | None = None
+    base_url: str | None = None
+    model: str | None = None
+    timeout_seconds: int = 120
+
+    def __post_init__(self) -> None:
+        self.base_url = (self.base_url or provider_base_url(self.provider)).rstrip("/")
+        self.api_key = self.api_key or provider_api_key(self.provider)
+        self.model = embedding_model_for_provider(self.provider, self.model)
+        if not self.model:
+            raise ModelClientError(f"No embedding model configured for provider={self.provider}.")
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise ModelClientError("The openai package is required for OpenAI-compatible embedding calls.") from exc
+        self._client = OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=self.timeout_seconds)
+
+    def embed_text(self, text: str, cache: JsonlEmbeddingCache | None = None) -> list[float]:
+        text = str(text).strip()
+        if not text:
+            return []
+        cache_key = JsonlEmbeddingCache.text_key(self.model or "", None, text)
+        if cache:
+            cached = cache.get(cache_key)
+            if cached is not None:
+                return cached
+        response = self._client.embeddings.create(model=self.model, input=text)
+        embedding = response.data[0].embedding
+        vector = [float(value) for value in embedding]
+        if cache:
+            cache.put(cache_key, vector)
+        return vector
+
+
+@dataclass
+class XinferenceRerankClient:
+    provider: str = "xinference"
+    api_key: str | None = None
+    base_url: str | None = None
+    model: str | None = None
+    timeout_seconds: int = 120
+
+    def __post_init__(self) -> None:
+        self.base_url = (self.base_url or provider_base_url(self.provider)).rstrip("/")
+        self.api_key = self.api_key or provider_api_key(self.provider)
+        self.model = rerank_model_for_provider(self.provider, self.model)
+        if not self.model:
+            raise ModelClientError(f"No rerank model configured for provider={self.provider}.")
+
+    def rerank(self, query: str, documents: list[str]) -> list[float]:
+        if not documents:
+            return []
+        payload = {
+            "model": self.model,
+            "query": query,
+            "documents": documents,
+        }
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        request = urllib.request.Request(
+            f"{self.base_url}/rerank",
+            data=data,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise ModelClientError(f"Rerank HTTP {exc.code}: {detail[:500]}") from exc
+        scores = [0.0 for _ in documents]
+        for item in result.get("results", []):
+            try:
+                index = int(item.get("index"))
+                scores[index] = float(item.get("relevance_score", item.get("score", 0.0)))
+            except (TypeError, ValueError, IndexError):
+                continue
+        return scores
+
+
+def create_chat_client(provider: str, model: str | None = None):
+    normalized = provider.strip().lower()
+    if normalized in {"ark", "doubao", "volcengine"}:
+        return ArkChatClient(model=model)
+    if normalized in {"xinference", "openai_compatible", "openai-compatible", "local_openai", "local-server"}:
+        return OpenAICompatibleChatClient(provider=normalized, model=model)
+    raise ModelClientError(f"Unsupported chat provider: {provider}")
 
 
 def _extract_embedding(payload: dict[str, Any]) -> list[float]:
