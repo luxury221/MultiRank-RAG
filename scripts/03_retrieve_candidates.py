@@ -37,6 +37,8 @@ CANDIDATE_FIELDS = [
     "score",
     "retriever",
     "embedding_model",
+    "source_routes",
+    "route_ranks",
     "source_ref",
     "content_preview",
 ]
@@ -48,7 +50,11 @@ def main() -> None:
     parser.add_argument("--nodes", default=str(DEFAULT_NODES.relative_to(DEFAULT_NODES.parents[2])))
     parser.add_argument("--output", default=str(DEFAULT_CANDIDATES.relative_to(DEFAULT_CANDIDATES.parents[2])))
     parser.add_argument("--top-k", type=int, default=50, help="Candidate pool size before reranking.")
-    parser.add_argument("--retriever", choices=["fusion", "hybrid", "embedding", "lexical", "bm25", "kg"], default="fusion")
+    parser.add_argument(
+        "--retriever",
+        choices=["fusion", "multiroute", "multi_route", "multi", "hybrid", "embedding", "lexical", "bm25", "kg"],
+        default="fusion",
+    )
     parser.add_argument("--embedding-model", default=DEFAULT_EMBEDDING_MODEL)
     parser.add_argument("--embedding-cache", default="outputs/embeddings")
     parser.add_argument("--embedding-device", default=DEFAULT_EMBEDDING_DEVICE)
@@ -61,6 +67,11 @@ def main() -> None:
     )
     parser.add_argument("--routes", default="", help="Optional DataFountain question route CSV for product-aware query expansion.")
     parser.add_argument("--expand-query", action="store_true", help="Append product route aliases to retrieval queries.")
+    parser.add_argument(
+        "--context-expansion",
+        action="store_true",
+        help="Add same-section/page table, figure, and neighboring text companions to the candidate pool.",
+    )
     parser.add_argument("--resume", action="store_true", help="Reuse complete question rows already present in output.")
     args = parser.parse_args()
 
@@ -68,7 +79,7 @@ def main() -> None:
     questions = [row for row in read_csv(args.questions) if clean_text(row.get("question"))]
     nodes = read_jsonl(args.nodes)
     embedding_index = None
-    if args.retriever in {"embedding", "hybrid", "fusion"} and nodes:
+    if args.retriever in {"embedding", "hybrid", "fusion", "multiroute", "multi_route", "multi"} and nodes:
         embedding_index = EmbeddingIndex.from_nodes(
             nodes,
             model_name=args.embedding_model,
@@ -121,20 +132,30 @@ def main() -> None:
             hybrid_alpha=args.hybrid_alpha,
             kg_index=kg_index,
             precomputed_embedding_scores=precomputed_embedding_scores[item_index],
+            context_expansion=args.context_expansion,
         )
+        source_routes = query_question.get("_multiroute_source_routes", {}) if isinstance(query_question, dict) else {}
+        route_ranks = query_question.get("_multiroute_route_ranks", {}) if isinstance(query_question, dict) else {}
         for rank, node in enumerate(candidates, start=1):
+            node_id = node.get("node_id", "")
             rows.append(
                 {
                     "question_id": question.get("question_id", ""),
                     "doc_id": question.get("doc_id", ""),
                     "question": question.get("question", ""),
                     "rank": rank,
-                    "node_id": node.get("node_id", ""),
+                    "node_id": node_id,
                     "node_type": node.get("node_type", ""),
                     "page": node.get("page", ""),
-                    "score": round(scores.get(node.get("node_id", ""), 0.0), 6),
+                    "score": round(scores.get(node_id, 0.0), 6),
                     "retriever": args.retriever,
-                    "embedding_model": args.embedding_model if args.retriever in {"embedding", "hybrid", "fusion"} else "",
+                    "embedding_model": (
+                        args.embedding_model
+                        if args.retriever in {"embedding", "hybrid", "fusion", "multiroute", "multi_route", "multi"}
+                        else ""
+                    ),
+                    "source_routes": source_routes.get(node_id, ""),
+                    "route_ranks": route_ranks.get(node_id, ""),
                     "source_ref": node.get("source_ref", ""),
                     "content_preview": preview(node.get("content", "")),
                 }

@@ -199,22 +199,29 @@ def run_step(args: list[str], env: dict[str, str] | None = None, dry_run: bool =
     subprocess.run(args, cwd=ROOT, env=env, check=True)
 
 
-def prepare_edges(py: str, variant: ExperimentVariant, nodes_path: Path, edges_path: Path, dry_run: bool) -> None:
+def prepare_edges(
+    py: str,
+    variant: ExperimentVariant,
+    nodes_path: Path,
+    edges_path: Path,
+    dry_run: bool,
+    enhanced_context_edges: bool = False,
+) -> None:
     if not variant.build_graph:
         if not dry_run:
             write_jsonl(edges_path, [])
         return
-    run_step(
-        [
+    cmd = [
             py,
             "scripts/02_build_graph.py",
             "--nodes",
             str(nodes_path),
             "--output",
             str(edges_path),
-        ],
-        dry_run=dry_run,
-    )
+        ]
+    if enhanced_context_edges:
+        cmd.append("--enhanced-context-edges")
+    run_step(cmd, dry_run=dry_run)
 
 
 def build_graphrag(py: str, variant: ExperimentVariant, nodes_path: Path, edges_path: Path, kg_dir: Path, dry_run: bool) -> str:
@@ -257,7 +264,14 @@ def run_variant(args: argparse.Namespace, variant: ExperimentVariant, base_nodes
         variant_dir.mkdir(parents=True, exist_ok=True)
         write_jsonl(nodes_path, transform_nodes(base_nodes, variant))
 
-    prepare_edges(py, variant, nodes_path, edges_path, args.dry_run)
+    prepare_edges(
+        py,
+        variant,
+        nodes_path,
+        edges_path,
+        args.dry_run,
+        enhanced_context_edges=bool(args.graph_context_boost and variant.build_graph),
+    )
     kg_arg = build_graphrag(py, variant, nodes_path, edges_path, kg_dir, args.dry_run)
     if not kg_arg:
         kg_arg = str(kg_dir)
@@ -266,8 +280,7 @@ def run_variant(args: argparse.Namespace, variant: ExperimentVariant, base_nodes
     env = os.environ.copy()
     env["RAG_ENABLE_MODEL_RERANK"] = "1" if variant.enable_model_rerank else "0"
 
-    run_step(
-        [
+    retrieve_cmd = [
             py,
             "scripts/03_retrieve_candidates.py",
             "--questions",
@@ -292,12 +305,12 @@ def run_variant(args: argparse.Namespace, variant: ExperimentVariant, base_nodes
             str(args.hybrid_alpha),
             "--kg-dir",
             kg_arg,
-        ],
-        env=env,
-        dry_run=args.dry_run,
-    )
-    run_step(
-        [
+        ]
+    if args.context_expansion:
+        retrieve_cmd.append("--context-expansion")
+    run_step(retrieve_cmd, env=env, dry_run=args.dry_run)
+
+    rerank_cmd = [
             py,
             "scripts/04_rerank.py",
             "--questions",
@@ -328,10 +341,14 @@ def run_variant(args: argparse.Namespace, variant: ExperimentVariant, base_nodes
             kg_arg,
             "--methods",
             variant.method,
-        ],
-        env=env,
-        dry_run=args.dry_run,
-    )
+        ]
+    if args.context_expansion:
+        rerank_cmd.append("--context-expansion")
+    if args.adaptive_rerank_boost:
+        rerank_cmd.append("--adaptive-rerank-boost")
+    if args.graph_context_boost:
+        rerank_cmd.append("--graph-context-boost")
+    run_step(rerank_cmd, env=env, dry_run=args.dry_run)
     run_step(
         [
             py,
@@ -351,8 +368,7 @@ def run_variant(args: argparse.Namespace, variant: ExperimentVariant, base_nodes
 
     if variant.build_chain and args.build_chains:
         chain_dir = variant_dir / "evidence_chains"
-        run_step(
-            [
+        chain_cmd = [
                 py,
                 "scripts/09_build_evidence_chains.py",
                 "--questions",
@@ -371,10 +387,10 @@ def run_variant(args: argparse.Namespace, variant: ExperimentVariant, base_nodes
                 str(chain_dir / "chain_steps.csv"),
                 "--output-md",
                 str(chain_dir / "evidence_chains.md"),
-            ],
-            env=env,
-            dry_run=args.dry_run,
-        )
+            ]
+        if args.evidence_guard:
+            chain_cmd.append("--evidence-guard")
+        run_step(chain_cmd, env=env, dry_run=args.dry_run)
         run_step(
             [
                 py,
@@ -477,7 +493,7 @@ def main() -> None:
     parser.add_argument("--rerank-k", type=int, default=10)
     parser.add_argument(
         "--retriever",
-        choices=["", "fusion", "hybrid", "embedding", "lexical", "bm25", "kg"],
+        choices=["", "fusion", "multiroute", "multi_route", "multi", "hybrid", "embedding", "lexical", "bm25", "kg"],
         default="",
         help="Optional override for all variants. Empty uses each variant default.",
     )
@@ -490,6 +506,26 @@ def main() -> None:
     parser.add_argument("--embedding-device", default=DEFAULT_EMBEDDING_DEVICE)
     parser.add_argument("--embedding-batch-size", type=int, default=DEFAULT_EMBEDDING_BATCH_SIZE)
     parser.add_argument("--hybrid-alpha", type=float, default=0.7)
+    parser.add_argument(
+        "--context-expansion",
+        action="store_true",
+        help="Ablation A: expand candidates with same-context table/figure/text companions.",
+    )
+    parser.add_argument(
+        "--adaptive-rerank-boost",
+        action="store_true",
+        help="Ablation B: enable stronger query-modality-aware reranking.",
+    )
+    parser.add_argument(
+        "--graph-context-boost",
+        action="store_true",
+        help="Ablation E: build stronger context graph edges and increase graph rerank signals.",
+    )
+    parser.add_argument(
+        "--evidence-guard",
+        action="store_true",
+        help="Filter noisy visual/table evidence when building evidence chains.",
+    )
     parser.add_argument("--build-chains", action="store_true", help="Build evidence chains for V4.")
     parser.add_argument("--generate-answers", action="store_true", help="Generate final answers from V4 evidence chains.")
     parser.add_argument(

@@ -17,7 +17,7 @@ from pipeline_common import (
     write_csv,
     write_jsonl,
 )
-from rerank_lib import build_graph, extract_document_refs, _looks_like_toc_entry
+from rerank_lib import build_graph, extract_document_refs, lexical_similarity, _looks_like_toc_entry
 
 
 CHAIN_FIELDS = [
@@ -36,6 +36,7 @@ CHAIN_FIELDS = [
     "bridge_score",
     "ref_score",
     "visual_score",
+    "guard_score",
     "source_ref",
     "page_image_path",
     "crop_image_path",
@@ -62,6 +63,11 @@ ROLE_LABELS = {
 EDGE_PRIORITY = {
     "text_ref_table": 1.0,
     "text_ref_figure": 1.0,
+    "same_context_visual": 0.85,
+    "same_context_table": 0.9,
+    "same_context_figure": 0.9,
+    "same_context_text": 0.42,
+    "section_multimodal_peer": 0.55,
     "table_caption": 0.95,
     "figure_caption": 0.95,
     "section_title": 0.45,
@@ -120,6 +126,93 @@ def chain_has_visual_node(steps: list[dict[str, Any]]) -> bool:
 
 def node_has_qwen_visual(node: dict[str, Any]) -> bool:
     return bool(clean_text(node.get("visual_caption")) or clean_text(node.get("qa_evidence")))
+
+
+def node_guard_text(node: dict[str, Any]) -> str:
+    return clean_text(
+        " ".join(
+            [
+                node.get("node_type", ""),
+                node.get("section", ""),
+                node.get("source_ref", ""),
+                node.get("content", ""),
+                node.get("visual_title", ""),
+                node.get("visual_type", ""),
+                node.get("ocr_text", ""),
+                node.get("data_or_trends", ""),
+                node.get("qa_evidence", ""),
+                node.get("visual_summary", ""),
+                node.get("visual_caption", ""),
+            ]
+        )
+    )
+
+
+def guard_alignment_score(
+    question: dict[str, str],
+    node: dict[str, Any],
+    row: dict[str, str] | None,
+    seed_pages: set[str],
+    preferred_pages: set[str],
+    question_refs: set[tuple[str, str]],
+) -> float:
+    """Estimate whether a visual/table node is useful evidence, not just a nearby decoration."""
+    text = node_guard_text(node)
+    semantic = lexical_similarity(question.get("question", ""), [text])[0] if text else 0.0
+    ranking = 0.0
+    if row:
+        rank = int(float(row.get("rank") or 99))
+        ranking += 0.20 * max(0.0, 1.0 - (rank - 1) / 10.0)
+        ranking += 0.18 * as_float(row.get("score"))
+        ranking += 0.12 * as_float(row.get("sim_score"))
+        ranking += 0.08 * as_float(row.get("visual_score"))
+    page = clean_text(node.get("page"))
+    context = 0.0
+    if preferred_pages and page in preferred_pages:
+        context += 0.26
+    elif seed_pages and page in seed_pages:
+        context += 0.16
+    if node_ref_hits(node, question_refs):
+        context += 0.32
+    if node_has_qwen_visual(node):
+        context += 0.08
+    if clean_text(node.get("crop_image_path")):
+        context += 0.04
+    return max(0.0, min(1.0, 0.48 * semantic + ranking + context))
+
+
+def visual_evidence_allowed(
+    question: dict[str, str],
+    node: dict[str, Any],
+    row: dict[str, str] | None,
+    seed_pages: set[str],
+    preferred_pages: set[str],
+    question_refs: set[tuple[str, str]],
+    wants_visual: bool,
+) -> tuple[bool, float]:
+    node_type = clean_text(node.get("node_type"))
+    if node_type not in VISUAL_NODE_TYPES:
+        return True, 1.0
+    guard_score = guard_alignment_score(question, node, row, seed_pages, preferred_pages, question_refs)
+    if question_refs:
+        if node_ref_hits(node, question_refs):
+            return True, guard_score
+        page = clean_text(node.get("page"))
+        if preferred_pages and page in preferred_pages and not node_refs_conflict(node, question_refs):
+            return True, guard_score
+        return False, guard_score
+    if not wants_visual:
+        return False, guard_score
+    if preferred_pages and clean_text(node.get("page")) in preferred_pages:
+        return guard_score >= 0.16, guard_score
+    if seed_pages and clean_text(node.get("page")) in seed_pages:
+        return guard_score >= 0.20, guard_score
+    rank = int(float(row.get("rank") or 99)) if row else 99
+    if rank <= 3 and guard_score >= 0.26:
+        return True, guard_score
+    if node_has_qwen_visual(node) and guard_score >= 0.30:
+        return True, guard_score
+    return False, guard_score
 
 
 def visual_node_score(
@@ -292,6 +385,7 @@ def add_step(
     role: str,
     relation: str,
     reason: str,
+    guard_score: float | None = None,
 ) -> None:
     node_id = clean_text(node.get("node_id"))
     if not node_id or node_id in seen:
@@ -316,6 +410,7 @@ def add_step(
             "bridge_score": round(as_float(row.get("bridge_score")) if row else 0.0, 6),
             "ref_score": round(as_float(row.get("ref_score")) if row else 0.0, 6),
             "visual_score": round(as_float(row.get("visual_score")) if row else 0.0, 6),
+            "guard_score": round(float(guard_score), 6) if guard_score is not None else "",
             "source_ref": node.get("source_ref", ""),
             "page_image_path": node.get("page_image_path", ""),
             "crop_image_path": node.get("crop_image_path", ""),
@@ -341,6 +436,11 @@ def relation_label(edge_types: list[str]) -> str:
     labels = {
         "text_ref_table": "正文引用表格",
         "text_ref_figure": "正文引用图片",
+        "same_context_visual": "同上下文图文证据",
+        "same_context_table": "同上下文表格证据",
+        "same_context_figure": "同上下文图片证据",
+        "same_context_text": "同上下文文本证据",
+        "section_multimodal_peer": "同章节多模态补充",
         "table_caption": "表格-表题",
         "figure_caption": "图片-图注",
         "section_title": "章节标题",
@@ -387,11 +487,15 @@ def build_chain_for_question(
     nodes_by_id: dict[str, dict[str, Any]],
     graph,
     max_steps: int,
+    evidence_guard: bool = False,
 ) -> list[dict[str, Any]]:
     ranking_rows = [row for row in ranking_rows if row.get("node_id") in nodes_by_id]
     ranking_by_node = {row.get("node_id", ""): row for row in ranking_rows}
     steps: list[dict[str, Any]] = []
     seen: set[str] = set()
+    question_refs = extract_document_refs(question.get("question", ""))
+    preferred_pages = preferred_reference_pages(question_refs, ranking_rows, nodes_by_id)
+    wants_visual = question_wants_visual(question)
 
     non_page = [
         row
@@ -411,11 +515,13 @@ def build_chain_for_question(
             "main_evidence",
             "G4 Top-1",
             "G4 综合相似度、图结构、编号引用与 Qwen 视觉证据后的首位证据。",
+            (
+                guard_alignment_score(question, node, main_row, set(), preferred_pages, question_refs)
+                if evidence_guard and clean_text(node.get("node_type")) in VISUAL_NODE_TYPES
+                else None
+            ),
         )
 
-    question_refs = extract_document_refs(question.get("question", ""))
-    preferred_pages = preferred_reference_pages(question_refs, ranking_rows, nodes_by_id)
-    wants_visual = question_wants_visual(question)
     ref_rows = sorted(
         [
             row
@@ -453,6 +559,29 @@ def build_chain_for_question(
             "问题中出现显式图表编号，该节点与编号或相邻图表区域匹配。",
         )
 
+    text_rows = [
+        row
+        for row in ranking_rows
+        if clean_text(nodes_by_id[row["node_id"]].get("node_type")) == "text"
+        and not _looks_like_toc_entry(nodes_by_id[row["node_id"]].get("content", ""))
+        and not node_refs_conflict(nodes_by_id[row["node_id"]], question_refs)
+    ]
+    if evidence_guard and not wants_visual:
+        for row in text_rows:
+            if len(steps) >= max_steps:
+                break
+            node = nodes_by_id[row["node_id"]]
+            add_step(
+                steps,
+                seen,
+                question,
+                node,
+                row,
+                "context_text",
+                "语义上下文",
+                "该文本段提供回答问题所需的解释性上下文；纯文本问题优先保留文本证据。",
+            )
+
     if wants_visual and not chain_has_visual_node(steps) and len(steps) < max_steps:
         for _, node_id, relation, reason in visual_completion_candidates(
             question,
@@ -466,6 +595,20 @@ def build_chain_for_question(
             if len(steps) >= max_steps:
                 break
             node = nodes_by_id[node_id]
+            guard_score = None
+            if evidence_guard:
+                seed_pages = {clean_text(step.get("page")) for step in steps if clean_text(step.get("page"))}
+                allowed, guard_score = visual_evidence_allowed(
+                    question,
+                    node,
+                    ranking_by_node.get(node_id),
+                    seed_pages,
+                    preferred_pages,
+                    question_refs,
+                    wants_visual,
+                )
+                if not allowed:
+                    continue
             add_step(
                 steps,
                 seen,
@@ -475,13 +618,18 @@ def build_chain_for_question(
                 "visual_companion",
                 relation,
                 reason,
+                guard_score,
             )
 
-    modality_rows = [
-        row
-        for row in ranking_rows
-        if clean_text(nodes_by_id[row["node_id"]].get("node_type")) in {"table", "figure", "caption"}
-    ]
+    modality_rows = (
+        []
+        if evidence_guard and not wants_visual
+        else [
+            row
+            for row in ranking_rows
+            if clean_text(nodes_by_id[row["node_id"]].get("node_type")) in {"table", "figure", "caption"}
+        ]
+    )
     if question_refs:
         modality_rows = [
             row
@@ -504,6 +652,20 @@ def build_chain_for_question(
         if len(steps) >= max_steps:
             break
         node = nodes_by_id[row["node_id"]]
+        guard_score = None
+        if evidence_guard:
+            seed_pages = {clean_text(step.get("page")) for step in steps if clean_text(step.get("page"))}
+            allowed, guard_score = visual_evidence_allowed(
+                question,
+                node,
+                row,
+                seed_pages,
+                preferred_pages,
+                question_refs,
+                wants_visual,
+            )
+            if not allowed:
+                continue
         add_step(
             steps,
             seen,
@@ -512,7 +674,12 @@ def build_chain_for_question(
             row,
             role_for_node_type(clean_text(node.get("node_type"))),
             "多模态节点补充",
-            "该节点提供表格、图片或图注层面的直接证据。",
+            (
+                "该节点通过问题意图、页码/上下文和视觉摘要一致性校验，可作为表格、图片或图注证据。"
+                if evidence_guard
+                else "该节点提供表格、图片或图注层面的直接证据。"
+            ),
+            guard_score,
         )
 
     if wants_visual and len(steps) < max_steps:
@@ -528,6 +695,20 @@ def build_chain_for_question(
             if len(steps) >= max_steps or node_id in seen:
                 break
             node = nodes_by_id[node_id]
+            guard_score = None
+            if evidence_guard:
+                seed_pages = {clean_text(step.get("page")) for step in steps if clean_text(step.get("page"))}
+                allowed, guard_score = visual_evidence_allowed(
+                    question,
+                    node,
+                    ranking_by_node.get(node_id),
+                    seed_pages,
+                    preferred_pages,
+                    question_refs,
+                    wants_visual,
+                )
+                if not allowed:
+                    continue
             add_step(
                 steps,
                 seen,
@@ -537,6 +718,7 @@ def build_chain_for_question(
                 "visual_companion",
                 relation,
                 reason,
+                guard_score,
             )
 
     seed_ids = [step["node_id"] for step in steps[:2]]
@@ -557,6 +739,20 @@ def build_chain_for_question(
                 if node_refs_conflict(node, question_refs):
                     continue
             row = ranking_by_node.get(neighbor_id)
+            guard_score = None
+            if evidence_guard and clean_text(node.get("node_type")) in VISUAL_NODE_TYPES:
+                seed_pages = {clean_text(step.get("page")) for step in steps if clean_text(step.get("page"))}
+                allowed, guard_score = visual_evidence_allowed(
+                    question,
+                    node,
+                    row,
+                    seed_pages,
+                    preferred_pages,
+                    question_refs,
+                    wants_visual,
+                )
+                if not allowed:
+                    continue
             add_step(
                 steps,
                 seen,
@@ -566,15 +762,9 @@ def build_chain_for_question(
                 "graph_neighbor",
                 relation_label(edge_types),
                 "该节点与前序证据存在图边关系，用于补全跨模态上下文。",
+                guard_score,
             )
 
-    text_rows = [
-        row
-        for row in ranking_rows
-        if clean_text(nodes_by_id[row["node_id"]].get("node_type")) == "text"
-        and not _looks_like_toc_entry(nodes_by_id[row["node_id"]].get("content", ""))
-        and not node_refs_conflict(nodes_by_id[row["node_id"]], question_refs)
-    ]
     for row in text_rows:
         if len(steps) >= max_steps:
             break
@@ -636,6 +826,11 @@ def main() -> None:
     parser.add_argument("--rankings", default="outputs/rankings/reranked.csv")
     parser.add_argument("--method", default="G4")
     parser.add_argument("--max-steps", type=int, default=5)
+    parser.add_argument(
+        "--evidence-guard",
+        action="store_true",
+        help="Filter noisy visual/table companions unless they match the question, page/context, or explicit refs.",
+    )
     parser.add_argument("--output-jsonl", default="outputs/evidence_chains/chains.jsonl")
     parser.add_argument("--output-csv", default="outputs/evidence_chains/chain_steps.csv")
     parser.add_argument("--output-md", default="outputs/evidence_chains/evidence_chains.md")
@@ -661,6 +856,7 @@ def main() -> None:
             nodes_by_id,
             graph,
             max_steps=args.max_steps,
+            evidence_guard=args.evidence_guard,
         )
         grouped_steps[qid] = steps
         all_steps.extend(steps)

@@ -49,6 +49,8 @@ RANKING_FIELDS = [
     "model_rerank_score",
     "adaptive_route",
     "rerank_profile",
+    "source_routes",
+    "route_ranks",
     "has_visual_crop",
     "has_visual_caption",
     "visual_title",
@@ -98,7 +100,11 @@ def main() -> None:
     parser.add_argument("--lambda-b", type=float, default=0.15)
     parser.add_argument("--lambda-r", type=float, default=0.1)
     parser.add_argument("--tau", type=float, default=0.2)
-    parser.add_argument("--retriever", choices=["fusion", "hybrid", "embedding", "lexical", "bm25", "kg"], default="fusion")
+    parser.add_argument(
+        "--retriever",
+        choices=["fusion", "multiroute", "multi_route", "multi", "hybrid", "embedding", "lexical", "bm25", "kg"],
+        default="fusion",
+    )
     parser.add_argument("--embedding-model", default=DEFAULT_EMBEDDING_MODEL)
     parser.add_argument("--embedding-cache", default="outputs/embeddings")
     parser.add_argument("--embedding-device", default=DEFAULT_EMBEDDING_DEVICE)
@@ -111,6 +117,21 @@ def main() -> None:
     )
     parser.add_argument("--routes", default="", help="Optional DataFountain question route CSV for product-aware query expansion.")
     parser.add_argument("--expand-query", action="store_true", help="Append product route aliases to reranking queries.")
+    parser.add_argument(
+        "--context-expansion",
+        action="store_true",
+        help="Keep same-context table/figure/text companions in the reranking pool.",
+    )
+    parser.add_argument(
+        "--adaptive-rerank-boost",
+        action="store_true",
+        help="Use stronger query-modality-aware G4 scoring for visual/table/cross-modal questions.",
+    )
+    parser.add_argument(
+        "--graph-context-boost",
+        action="store_true",
+        help="Increase graph/PPR/bridge contribution for GraphRAG evidence-chain experiments.",
+    )
     parser.add_argument(
         "--methods",
         type=parse_methods,
@@ -126,7 +147,7 @@ def main() -> None:
     edges = read_jsonl(args.edges)
     candidates_by_qid = group_candidates(read_csv(args.candidates))
     embedding_index = None
-    if args.retriever in {"embedding", "hybrid", "fusion"} and nodes:
+    if args.retriever in {"embedding", "hybrid", "fusion", "multiroute", "multi_route", "multi"} and nodes:
         embedding_index = EmbeddingIndex.from_nodes(
             nodes,
             model_name=args.embedding_model,
@@ -188,6 +209,9 @@ def main() -> None:
             embedding_batch_size=args.embedding_batch_size,
             hybrid_alpha=args.hybrid_alpha,
             kg_index=kg_index,
+            context_expansion=args.context_expansion,
+            adaptive_rerank_boost=args.adaptive_rerank_boost,
+            graph_context_boost=args.graph_context_boost,
         )
         for row in question_rows:
             if row.get("method") not in args.methods:

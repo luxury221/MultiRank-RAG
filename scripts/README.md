@@ -34,6 +34,9 @@ Useful options:
 34_generate_chain_answers.py    Generate final answers grounded by evidence chains
 11_build_evidence_cards.py      Render evidence card assets
 12_check_evidence_cards.py      Check card completeness
+42_enhance_multimodal_nodes.py  Enhance table and visual nodes
+50_export_experiment_summary.py Export experiment summaries to Excel/CSV
+52_self_correct_evidence.py     Verify, merge, or replace evidence chains
 ```
 
 ## Main Experiment
@@ -102,3 +105,25 @@ See `docs/MODEL_GATEWAY.md` for complete examples.
 ```
 
 Generated artifacts are written to `outputs/` and are ignored by Git by default.
+
+## Current Recommended Flow
+
+The current recommended research pipeline is:
+
+```text
+ABECD + Evidence Guard + SelfCorrect merge-v2
+```
+
+This means:
+
+```text
+A  context expansion
+B  query-adaptive reranking
+E  GraphRAG graph/context enhancement
+C  table-structure enhancement
+D  visual evidence enhancement
+Guard  evidence-chain completeness constraints
+SelfCorrect merge-v2  primary/fallback evidence verification and merge
+```
+
+Use `52_self_correct_evidence.py` after a stable primary run and a multiroute fallback run when you want the final evidence chains to keep high-precision ordering while supplementing missing visual/table/bridge evidence.

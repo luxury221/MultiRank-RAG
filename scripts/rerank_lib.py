@@ -33,13 +33,17 @@ TYPE_WEIGHTS = {
 }
 
 DEFAULT_MODALITIES = ["text", "table", "figure", "page", "caption"]
-RETRIEVER_CHOICES = ["fusion", "hybrid", "embedding", "lexical", "bm25", "kg"]
+RETRIEVER_CHOICES = ["fusion", "multiroute", "multi_route", "multi", "hybrid", "embedding", "lexical", "bm25", "kg"]
 DEFAULT_KG_DIR = os.getenv("RAG_KG_DIR", "outputs/graphrag")
+MULTIROUTE_TOP_K = int(os.getenv("RAG_MULTIROUTE_TOP_K", "80"))
+MULTIROUTE_RRF_K = int(os.getenv("RAG_MULTIROUTE_RRF_K", "50"))
+MULTIROUTE_PROFILE = os.getenv("RAG_MULTIROUTE_PROFILE", "balanced").strip().lower() or "balanced"
 
 _CORPUS_FEATURE_CACHE: dict[tuple[str, ...], dict[str, Any]] = {}
 _GRAPH_BUILD_CACHE: dict[tuple[int, int, int, int], nx.Graph] = {}
 _NODES_BY_ID_CACHE: dict[tuple[str, ...], dict[str, dict[str, Any]]] = {}
 _NODE_REFS_CACHE: dict[int, dict[str, set[tuple[str, str]]]] = {}
+_CONTEXT_INDEX_CACHE: dict[tuple[str, ...], dict[str, Any]] = {}
 
 KG_CONCRETE_TYPES = {"product", "part", "fault", "image"}
 KG_SUPPORT_TYPES = {"action", "policy"}
@@ -73,6 +77,11 @@ KG_GENERIC_ACTION_TERMS = {"use", "operate", "\u4f7f\u7528", "\u64cd\u4f5c"}
 BASE_EDGE_TYPE_WEIGHTS = {
     "same_page": 0.05,
     "belongs_to_page": 0.05,
+    "same_context_visual": 0.62,
+    "same_context_table": 0.72,
+    "same_context_figure": 0.72,
+    "same_context_text": 0.28,
+    "section_multimodal_peer": 0.24,
     "text_ref_table": 1.0,
     "text_ref_figure": 1.0,
     "table_caption": 1.2,
@@ -377,6 +386,8 @@ def _cached_texts_for_nodes(nodes: list[dict[str, Any]], text_key: str) -> list[
             )
             for node in nodes
         ]
+    elif text_key == "table_structure":
+        texts = [table_structure_text(node) for node in nodes]
     elif text_key == "product":
         texts = [product_route_text(node) for node in nodes]
     else:
@@ -750,6 +761,67 @@ def visual_route_scores(question: dict[str, Any], nodes: list[dict[str, Any]]) -
     return scores
 
 
+def table_structure_text(node: dict[str, Any]) -> str:
+    return clean_text(
+        " ".join(
+            [
+                clean_text(node.get("node_type")),
+                clean_text(node.get("section")),
+                clean_text(node.get("source_ref")),
+                clean_text(node.get("table_caption")),
+                clean_text(node.get("table_headers")),
+                clean_text(node.get("table_shape")),
+                clean_text(node.get("table_key_facts")),
+                clean_text(node.get("table_numeric_facts")),
+                clean_text(node.get("table_summary")),
+                _safe_json_text(node.get("table_structured_json")),
+                clean_text(node.get("qa_evidence")) if clean_text(node.get("node_type")) == "table" else "",
+                preview(node.get("content", ""), 500),
+            ]
+        )
+    )
+
+
+def table_structure_route_scores(question: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[str, float]:
+    intent = question_intent(question)
+    structured = is_structured_table_reasoning(question)
+    if not (structured or intent["table"] or intent["cross"]):
+        return {clean_text(node.get("node_id")): 0.0 for node in nodes if clean_text(node.get("node_id"))}
+
+    query = clean_text(question.get("question", ""))
+    if structured:
+        query = clean_text(
+            f"{query} table headers rows columns numeric values percentage change total difference"
+        )
+    raw_scores = _scores_from_cached_texts(query, nodes, "table_structure")
+    numeric_query = bool(re.search(r"\b(?:19|20)\d{2}\b|[$%]|\b\d+(?:\.\d+)?\b", query))
+    scores: dict[str, float] = {}
+    for node in nodes:
+        node_id = clean_text(node.get("node_id"))
+        if not node_id:
+            continue
+        node_type = clean_text(node.get("node_type"))
+        score = raw_scores.get(node_id, 0.0)
+        if node_type == "table":
+            score += 0.32
+            if clean_text(node.get("table_headers")):
+                score += 0.10
+            if clean_text(node.get("table_key_facts")):
+                score += 0.10
+            if numeric_query and clean_text(node.get("table_numeric_facts")):
+                score += 0.12
+            if structured:
+                score += 0.12
+        elif node_type == "caption":
+            score = 0.72 * score + 0.04
+        elif node_type == "text":
+            score = 0.58 * score
+        elif node_type == "figure":
+            score = 0.45 * score
+        scores[node_id] = max(0.0, score)
+    return scores
+
+
 def layout_route_scores(question: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[str, float]:
     intent = question_intent(question)
     if not intent["location"]:
@@ -832,6 +904,7 @@ def route_weights_for_question(
         "section": 0.38,
         "reference": 0.95 if extract_document_refs(question.get("question", "")) else 0.35,
         "visual": 0.12,
+        "table_structure": 0.18,
         "layout": 0.05,
     }
     primary = profile["primary"]
@@ -867,9 +940,11 @@ def route_weights_for_question(
         weights["section"] = 0.18
         weights["reference"] = 0.3 if extract_document_refs(question.get("question", "")) else 0.12
         weights["visual"] = 0.06
+        weights["table_structure"] = 1.35
         weights["layout"] = 0.0
     elif primary == "visual":
         weights["visual"] = 0.7
+        weights["table_structure"] = 0.72 if intent["table"] else 0.22
         weights["layout"] = max(weights["layout"], 0.28)
         weights["reference"] = max(weights["reference"], 0.9)
     elif primary == "text_fact":
@@ -879,9 +954,12 @@ def route_weights_for_question(
         weights["embedding"] = min(weights["embedding"], 0.62)
     if (intent["table"] or intent["figure"]) and not structured_table:
         weights["visual"] = max(weights["visual"], 0.62)
+        if intent["table"]:
+            weights["table_structure"] = max(weights["table_structure"], 0.88)
         weights["reference"] = max(weights["reference"], 0.8)
     if intent["cross"] and not structured_table:
         weights["visual"] = max(weights["visual"], 0.55)
+        weights["table_structure"] = max(weights["table_structure"], 0.72 if intent["table"] else 0.28)
         weights["section"] = max(weights["section"], 0.62)
     if intent["location"] and not structured_table:
         weights["layout"] = 0.4
@@ -890,6 +968,7 @@ def route_weights_for_question(
         weights["layout"] *= 0.4
     if structured_table:
         weights["visual"] = min(weights["visual"], 0.06)
+        weights["table_structure"] = max(weights["table_structure"], 1.35)
         weights["layout"] = 0.0
         weights["kg"] = 0.0
     return {route: weights.get(route, 0.5) for route in available_routes}
@@ -1024,7 +1103,7 @@ def rrf_fuse_scores(
     return normalize_scores(fused, node_ids)
 
 
-def fusion_scores(
+def route_scores_for_question(
     question: dict[str, Any],
     nodes: list[dict[str, Any]],
     embedding_index: EmbeddingIndex | None = None,
@@ -1034,11 +1113,11 @@ def fusion_scores(
     embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
     kg_index: dict[str, Any] | None = None,
     precomputed_embedding_scores: dict[str, float] | None = None,
-) -> dict[str, float]:
+) -> tuple[list[dict[str, Any]], list[str], dict[str, dict[str, float]]]:
     nodes = _scorable_nodes(nodes)
     node_ids = list(_corpus_feature(nodes)["node_ids"])
     if not nodes:
-        return {}
+        return [], [], {}
     route_scores: dict[str, dict[str, float]] = {
         "lexical": _scores_from_cached_texts(question.get("question", ""), nodes, "retrieval"),
         "bm25": _bm25_scores_from_cached_texts(question.get("question", ""), nodes, "retrieval"),
@@ -1047,6 +1126,7 @@ def fusion_scores(
         "section": section_structure_scores(question, nodes),
         "reference": reference_route_scores(question, nodes),
         "visual": visual_route_scores(question, nodes),
+        "table_structure": table_structure_route_scores(question, nodes),
         "layout": layout_route_scores(question, nodes),
     }
     embedding_scores = _embedding_scores_safe(
@@ -1066,12 +1146,256 @@ def fusion_scores(
         for route, scores in route_scores.items()
         if any(score > 0 for score in scores.values())
     }
+    return nodes, node_ids, route_scores
+
+
+def fusion_scores(
+    question: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    embedding_index: EmbeddingIndex | None = None,
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+    embedding_cache: str = str(DEFAULT_EMBEDDING_CACHE_DIR),
+    embedding_device: str = DEFAULT_EMBEDDING_DEVICE,
+    embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
+    kg_index: dict[str, Any] | None = None,
+    precomputed_embedding_scores: dict[str, float] | None = None,
+) -> dict[str, float]:
+    nodes, node_ids, route_scores = route_scores_for_question(
+        question,
+        nodes,
+        embedding_index=embedding_index,
+        embedding_model=embedding_model,
+        embedding_cache=embedding_cache,
+        embedding_device=embedding_device,
+        embedding_batch_size=embedding_batch_size,
+        kg_index=kg_index,
+        precomputed_embedding_scores=precomputed_embedding_scores,
+    )
+    if not nodes:
+        return {}
     if not route_scores:
         return {node_id: 0.0 for node_id in node_ids}
     fused = rrf_fuse_scores(route_scores, node_ids, route_weights_for_question(question, route_scores, kg_index))
     fused = anchor_fusion_to_bm25(question, route_scores, fused, node_ids)
     fused = apply_node_answer_priors(question, nodes, fused)
     return smooth_structured_table_pairs(question, nodes, fused)
+
+
+def _multiroute_route_limit(question: dict[str, Any], route: str, base_limit: int) -> int:
+    intent = question_intent(question)
+    route = clean_text(route)
+    if route in {"visual", "layout"} and not intent["visual"]:
+        return max(8, base_limit // 4)
+    if route == "table_structure" and not (intent["table"] or intent["cross"] or is_structured_table_reasoning(question)):
+        return max(8, base_limit // 5)
+    if route == "kg" and not (is_multihop_reasoning(question) or is_after_sales_question(question)):
+        return max(8, base_limit // 3)
+    if route == "reference" and not extract_document_refs(question.get("question", "")):
+        return max(12, base_limit // 3)
+    return base_limit
+
+
+def multiroute_route_weights_for_question(
+    question: dict[str, Any],
+    route_scores: dict[str, dict[str, float]],
+    kg_index: dict[str, Any] | None,
+) -> dict[str, float]:
+    weights = route_weights_for_question(question, route_scores, kg_index)
+    route = adaptive_rag_route(question)
+    intent = question_intent(question)
+
+    # Multi-route retrieval uses BM25/lexical for coverage, but keeps dense retrieval
+    # as the high-precision anchor to reduce cross-document collisions.
+    weights["embedding"] = weights.get("embedding", 0.0) * 1.35
+    weights["bm25"] = weights.get("bm25", 0.0) * 0.72
+    weights["lexical"] = weights.get("lexical", 0.0) * 0.72
+    weights["section"] = weights.get("section", 0.0) * 0.82
+
+    if route in {"general_text", "text_fact"}:
+        weights["embedding"] *= 1.18
+        weights["visual"] = weights.get("visual", 0.0) * 0.45
+        weights["table_structure"] = weights.get("table_structure", 0.0) * 0.45
+    elif route == "structured_table":
+        weights["table_structure"] = weights.get("table_structure", 0.0) * 1.28
+        weights["bm25"] *= 0.95
+        weights["visual"] = weights.get("visual", 0.0) * 0.45
+    elif route == "visual_grounding":
+        weights["visual"] = weights.get("visual", 0.0) * 1.18
+        weights["table_structure"] = weights.get("table_structure", 0.0) * (1.05 if intent["table"] else 0.5)
+        weights["embedding"] *= 1.05
+    elif route == "cross_modal":
+        weights["visual"] = weights.get("visual", 0.0) * 1.12
+        weights["table_structure"] = weights.get("table_structure", 0.0) * 1.15
+        weights["embedding"] *= 1.02
+        weights["bm25"] *= 0.92
+    elif route == "multihop_graph":
+        weights["kg"] = weights.get("kg", 0.0) * 1.25
+        weights["section"] *= 1.1
+    return weights
+
+
+def apply_multiroute_precision_anchor(
+    question: dict[str, Any],
+    route_scores: dict[str, dict[str, float]],
+    fused: dict[str, float],
+    node_ids: list[str],
+) -> dict[str, float]:
+    if not node_ids:
+        return fused
+    route = adaptive_rag_route(question)
+    intent = question_intent(question)
+    embedding = normalize_scores(route_scores.get("embedding", {}), node_ids)
+    bm25 = normalize_scores(route_scores.get("bm25", {}), node_ids)
+    visual = normalize_scores(route_scores.get("visual", {}), node_ids)
+    table = normalize_scores(route_scores.get("table_structure", {}), node_ids)
+
+    embed_weight = 0.20
+    bm25_weight = 0.08
+    visual_weight = 0.0
+    table_weight = 0.0
+    if route in {"general_text", "text_fact"}:
+        embed_weight = 0.26
+        bm25_weight = 0.10
+    elif route == "structured_table":
+        embed_weight = 0.16
+        bm25_weight = 0.12
+        table_weight = 0.16
+    elif route == "visual_grounding":
+        embed_weight = 0.20
+        bm25_weight = 0.05
+        visual_weight = 0.13
+        table_weight = 0.08 if intent["table"] else 0.0
+    elif route == "cross_modal":
+        embed_weight = 0.17
+        bm25_weight = 0.05
+        visual_weight = 0.12
+        table_weight = 0.12 if intent["table"] else 0.04
+    elif route == "multihop_graph":
+        embed_weight = 0.16
+        bm25_weight = 0.07
+
+    available = {
+        "embedding": any(score > 0 for score in embedding.values()),
+        "bm25": any(score > 0 for score in bm25.values()),
+        "visual": any(score > 0 for score in visual.values()),
+        "table": any(score > 0 for score in table.values()),
+    }
+    if not available["embedding"]:
+        embed_weight = 0.0
+    if not available["bm25"]:
+        bm25_weight = 0.0
+    if not available["visual"]:
+        visual_weight = 0.0
+    if not available["table"]:
+        table_weight = 0.0
+    anchor_weight = min(0.48, embed_weight + bm25_weight + visual_weight + table_weight)
+    if anchor_weight <= 0:
+        return fused
+
+    anchor: dict[str, float] = {}
+    for node_id in node_ids:
+        anchor[node_id] = (
+            embed_weight * embedding.get(node_id, 0.0)
+            + bm25_weight * bm25.get(node_id, 0.0)
+            + visual_weight * visual.get(node_id, 0.0)
+            + table_weight * table.get(node_id, 0.0)
+        ) / anchor_weight
+    anchor = normalize_scores(anchor, node_ids)
+    return normalize_scores(
+        {
+            node_id: (1.0 - anchor_weight) * fused.get(node_id, 0.0) + anchor_weight * anchor.get(node_id, 0.0)
+            for node_id in node_ids
+        },
+        node_ids,
+    )
+
+
+def multiroute_scores(
+    question: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    embedding_index: EmbeddingIndex | None = None,
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+    embedding_cache: str = str(DEFAULT_EMBEDDING_CACHE_DIR),
+    embedding_device: str = DEFAULT_EMBEDDING_DEVICE,
+    embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
+    kg_index: dict[str, Any] | None = None,
+    precomputed_embedding_scores: dict[str, float] | None = None,
+) -> dict[str, float]:
+    nodes, node_ids, route_scores = route_scores_for_question(
+        question,
+        nodes,
+        embedding_index=embedding_index,
+        embedding_model=embedding_model,
+        embedding_cache=embedding_cache,
+        embedding_device=embedding_device,
+        embedding_batch_size=embedding_batch_size,
+        kg_index=kg_index,
+        precomputed_embedding_scores=precomputed_embedding_scores,
+    )
+    if not nodes:
+        return {}
+    if not route_scores:
+        return {node_id: 0.0 for node_id in node_ids}
+
+    profile = MULTIROUTE_PROFILE
+    precision_profile = profile in {"precision", "tuned", "embedding_anchor"}
+    weights = (
+        multiroute_route_weights_for_question(question, route_scores, kg_index)
+        if precision_profile
+        else route_weights_for_question(question, route_scores, kg_index)
+    )
+    fused = {node_id: 0.0 for node_id in node_ids}
+    source_routes: dict[str, list[str]] = defaultdict(list)
+    source_ranks: dict[str, list[str]] = defaultdict(list)
+    base_limit = max(8, MULTIROUTE_TOP_K)
+    for route, scores in route_scores.items():
+        normalized = normalize_scores(scores, node_ids)
+        ranking = [
+            (node_id, normalized.get(node_id, 0.0))
+            for node_id in node_ids
+            if normalized.get(node_id, 0.0) > 0.0
+        ]
+        ranking.sort(key=lambda item: item[1], reverse=True)
+        route_limit = _multiroute_route_limit(question, route, base_limit)
+        weight = weights.get(route, 0.5)
+        for rank, (node_id, score) in enumerate(ranking[:route_limit], start=1):
+            fused[node_id] += weight * (1.0 / (MULTIROUTE_RRF_K + rank)) * (0.35 + 0.65 * score)
+            source_routes[node_id].append(route)
+            source_ranks[node_id].append(f"{route}:{rank}")
+
+    fused = normalize_scores(fused, node_ids)
+    # Reward agreement between genuinely different routes, but keep it small so one precise route can still win.
+    for node_id, routes in source_routes.items():
+        unique_routes = set(routes)
+        if precision_profile:
+            fused[node_id] += min(0.045, 0.010 * max(0, len(unique_routes) - 1))
+        else:
+            fused[node_id] += min(0.08, 0.018 * max(0, len(unique_routes) - 1))
+        if {"embedding", "bm25"} <= unique_routes:
+            fused[node_id] += 0.010 if precision_profile else 0.018
+        if {"visual", "table_structure"} <= unique_routes:
+            fused[node_id] += 0.012 if precision_profile else 0.018
+        if {"reference", "visual"} <= unique_routes or {"reference", "table_structure"} <= unique_routes:
+            fused[node_id] += 0.012 if precision_profile else 0.02
+    fused = normalize_scores(fused, node_ids)
+    if precision_profile:
+        fused = apply_multiroute_precision_anchor(question, route_scores, fused, node_ids)
+    else:
+        fused = anchor_fusion_to_bm25(question, route_scores, fused, node_ids)
+    fused = apply_node_answer_priors(question, nodes, fused)
+    fused = smooth_structured_table_pairs(question, nodes, fused)
+
+    question["_multiroute_source_routes"] = {
+        node_id: "|".join(dict.fromkeys(source_routes.get(node_id, [])))
+        for node_id in node_ids
+        if source_routes.get(node_id)
+    }
+    question["_multiroute_route_ranks"] = {
+        node_id: "|".join(source_ranks.get(node_id, []))
+        for node_id in node_ids
+        if source_ranks.get(node_id)
+    }
+    return normalize_scores(fused, node_ids)
 
 
 def similarity_scores(
@@ -1094,6 +1418,18 @@ def similarity_scores(
     retriever = (retriever or "lexical").lower()
     if retriever == "fusion":
         return fusion_scores(
+            question,
+            nodes,
+            embedding_index=embedding_index,
+            embedding_model=embedding_model,
+            embedding_cache=embedding_cache,
+            embedding_device=embedding_device,
+            embedding_batch_size=embedding_batch_size,
+            kg_index=kg_index,
+            precomputed_embedding_scores=precomputed_embedding_scores,
+        )
+    if retriever in {"multiroute", "multi_route", "multi"}:
+        return multiroute_scores(
             question,
             nodes,
             embedding_index=embedding_index,
@@ -1193,6 +1529,144 @@ def nodes_by_id_cached(nodes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]
         cached = {clean_text(node.get("node_id")): node for node in nodes if clean_text(node.get("node_id"))}
         _NODES_BY_ID_CACHE[key] = cached
     return cached
+
+
+def _source_context_ref(source_ref: Any) -> str:
+    source_ref = clean_text(source_ref)
+    if not source_ref:
+        return ""
+    return re.sub(r"/(?:figure|fig|table|caption|image)_?\d+[A-Za-z-]*$", "", source_ref, flags=re.I)
+
+
+def _node_context_keys(node: dict[str, Any]) -> list[tuple[str, str]]:
+    doc_id = clean_text(node.get("doc_id"))
+    keys: list[tuple[str, str]] = []
+    context_ref = _source_context_ref(node.get("source_ref"))
+    if context_ref:
+        keys.append(("source", context_ref))
+    section = clean_text(node.get("section"))
+    if doc_id and section:
+        keys.append(("section", f"{doc_id}::{section}"))
+    page = clean_text(node.get("page"))
+    if doc_id and page:
+        keys.append(("page", f"{doc_id}::{page}"))
+    parent_id = clean_text(node.get("parent_chunk_id"))
+    if parent_id:
+        keys.append(("parent", parent_id))
+    return keys
+
+
+def _context_index(nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    key = _corpus_key(nodes)
+    cached = _CONTEXT_INDEX_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    groups: dict[tuple[str, str], list[str]] = defaultdict(list)
+    order = [clean_text(node.get("node_id")) for node in nodes if clean_text(node.get("node_id"))]
+    for node in nodes:
+        node_id = clean_text(node.get("node_id"))
+        if not node_id:
+            continue
+        for group_key in _node_context_keys(node):
+            groups[group_key].append(node_id)
+
+    cached = {
+        "groups": {group_key: list(dict.fromkeys(node_ids)) for group_key, node_ids in groups.items()},
+        "order": order,
+        "position": {node_id: index for index, node_id in enumerate(order)},
+    }
+    _CONTEXT_INDEX_CACHE[key] = cached
+    return cached
+
+
+def _context_relation_weight(seed: dict[str, Any], neighbor: dict[str, Any], group_kind: str) -> float:
+    neighbor_type = clean_text(neighbor.get("node_type")) or "text"
+    seed_type = clean_text(seed.get("node_type")) or "text"
+    if group_kind == "source":
+        base = 0.94
+    elif group_kind == "section":
+        base = 0.82
+    elif group_kind == "page":
+        base = 0.62
+    else:
+        base = 0.72
+    if neighbor_type in {"table", "figure", "caption"}:
+        base += 0.12
+    if seed_type in {"table", "figure", "caption"} and neighbor_type == "text":
+        base += 0.05
+    if neighbor_type == "page":
+        base *= 0.35
+    return max(0.0, min(1.0, base))
+
+
+def expand_candidates_by_context(
+    question: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    candidate_ids: list[str],
+    score_by_id: dict[str, float],
+    top_k: int,
+    seed_limit: int = 14,
+    max_neighbors_per_seed: int = 8,
+) -> tuple[list[str], dict[str, float]]:
+    """Add same-section/page multimodal companions while keeping a fixed candidate budget."""
+    if not candidate_ids or top_k <= 0:
+        return candidate_ids[:top_k], score_by_id
+
+    nodes_by_id = nodes_by_id_cached(nodes)
+    context_index = _context_index(nodes)
+    groups: dict[tuple[str, str], list[str]] = context_index["groups"]
+    position: dict[str, int] = context_index["position"]
+    candidate_set = set(candidate_ids)
+    adjusted = dict(score_by_id)
+    expansion_scores: dict[str, float] = {}
+    intent = question_intent(question)
+    wants_visual = intent["visual"] or intent["table"] or intent["figure"] or intent["cross"]
+    modality_bias = 1.08 if wants_visual else 1.0
+
+    seeds = sorted(
+        [node_id for node_id in candidate_ids if node_id in nodes_by_id],
+        key=lambda node_id: score_by_id.get(node_id, 0.0),
+        reverse=True,
+    )[:seed_limit]
+
+    for seed_rank, seed_id in enumerate(seeds, start=1):
+        seed = nodes_by_id.get(seed_id, {})
+        seed_score = max(score_by_id.get(seed_id, 0.0), 0.0)
+        if seed_score <= 0:
+            seed_score = max(0.01, 1.0 / (seed_rank + 3.0))
+        gathered: dict[str, float] = {}
+        for group_key in _node_context_keys(seed):
+            group_kind = group_key[0]
+            for neighbor_id in groups.get(group_key, []):
+                if neighbor_id == seed_id or neighbor_id not in nodes_by_id:
+                    continue
+                neighbor = nodes_by_id[neighbor_id]
+                if _looks_like_toc_entry(neighbor.get("content", "")):
+                    continue
+                if clean_text(seed.get("doc_id")) and clean_text(neighbor.get("doc_id")) != clean_text(seed.get("doc_id")):
+                    continue
+                relation_weight = _context_relation_weight(seed, neighbor, group_kind)
+                distance = abs(position.get(seed_id, 0) - position.get(neighbor_id, 0))
+                proximity = 1.0 / math.sqrt(1.0 + min(distance, 24))
+                neighbor_type = clean_text(neighbor.get("node_type")) or "text"
+                type_boost = modality_bias if neighbor_type in {"table", "figure", "caption"} else 0.92
+                value = seed_score * relation_weight * (0.75 + 0.25 * proximity) * type_boost
+                gathered[neighbor_id] = max(gathered.get(neighbor_id, 0.0), value)
+        for neighbor_id, value in sorted(gathered.items(), key=lambda item: item[1], reverse=True)[:max_neighbors_per_seed]:
+            previous = expansion_scores.get(neighbor_id, 0.0)
+            expansion_scores[neighbor_id] = max(previous, value)
+
+    for node_id, value in expansion_scores.items():
+        if node_id in candidate_set:
+            adjusted[node_id] = max(adjusted.get(node_id, 0.0), value)
+        else:
+            adjusted[node_id] = max(score_by_id.get(node_id, 0.0), value)
+
+    merged_ids = list(dict.fromkeys([*candidate_ids, *expansion_scores.keys()]))
+    merged_ids = [node_id for node_id in merged_ids if node_id in nodes_by_id]
+    merged_ids.sort(key=lambda node_id: adjusted.get(node_id, 0.0), reverse=True)
+    return merged_ids[:top_k], adjusted
 
 
 def _prepare_ref_text(text: Any) -> str:
@@ -1538,9 +2012,11 @@ def kg_route_scores(
 def question_intent(question: dict[str, Any]) -> dict[str, bool]:
     blob = _question_blob(question)
     qtype = clean_text(question.get("question_type")).casefold()
-    wants_table = _contains_any(blob, TABLE_TERMS)
-    wants_figure = _contains_any(blob, FIGURE_TERMS)
-    wants_cross = _contains_any(blob, CROSS_MODAL_TERMS)
+    wants_table = _contains_any(blob, TABLE_TERMS) or "table" in qtype
+    wants_figure = _contains_any(blob, FIGURE_TERMS) or "image" in qtype or "figure" in qtype
+    wants_cross = _contains_any(blob, CROSS_MODAL_TERMS) or (
+        ("table" in qtype or wants_table) and ("image" in qtype or "figure" in qtype or wants_figure)
+    )
     wants_location = _contains_any(blob, LOCATION_TERMS)
     text_fact = _contains_any(qtype, TEXT_FACT_TERMS)
     visual_type = _contains_any(qtype, VISUAL_QUESTION_TYPE_TERMS)
@@ -1781,6 +2257,93 @@ def visual_signal_weight(question: dict[str, Any], visual_raw: dict[str, float])
     if intent["visual"]:
         return 0.035
     return 0.015
+
+
+def adaptive_modality_alignment_scores(
+    question: dict[str, Any],
+    nodes_by_id: dict[str, dict[str, Any]],
+    graph: nx.Graph,
+    candidate_ids: list[str],
+) -> dict[str, float]:
+    if not candidate_ids:
+        return {}
+    intent = question_intent(question)
+    if not (intent["visual"] or intent["table"] or intent["figure"] or intent["cross"]):
+        return {node_id: 0.0 for node_id in candidate_ids}
+
+    wanted_types: set[str] = {"text"}
+    if intent["table"]:
+        wanted_types.add("table")
+        wanted_types.add("caption")
+    if intent["figure"]:
+        wanted_types.add("figure")
+        wanted_types.add("caption")
+    if intent["cross"]:
+        wanted_types.update({"table", "figure", "caption"})
+
+    scores: dict[str, float] = {}
+    for node_id in candidate_ids:
+        node = nodes_by_id.get(node_id, {})
+        node_type = clean_text(node.get("node_type")) or "text"
+        node_score = 0.0
+        if node_type in wanted_types:
+            node_score += {
+                "text": 0.36,
+                "table": 0.58,
+                "figure": 0.58,
+                "caption": 0.48,
+            }.get(node_type, 0.0)
+        if node_type in {"table", "figure", "caption"} and node_has_visual_caption(node):
+            node_score += 0.08
+
+        neighbor_types: set[str] = set()
+        relation_score = 0.0
+        table_only = intent["table"] and not (intent["figure"] or intent["cross"])
+        if node_id in graph:
+            for neighbor in graph.neighbors(node_id):
+                neighbor_node = nodes_by_id.get(neighbor, {})
+                if not neighbor_node or _looks_like_toc_entry(neighbor_node.get("content", "")):
+                    continue
+                neighbor_type = clean_text(neighbor_node.get("node_type")) or "text"
+                neighbor_types.add(neighbor_type)
+                edge_data = graph.get_edge_data(node_id, neighbor, default={})
+                edge_types = set(edge_data.get("edge_types") or [edge_data.get("edge_type", "related")])
+                strong_edges = {"text_ref_table", "text_ref_figure", "table_caption", "figure_caption"}
+                if not table_only:
+                    strong_edges |= {"same_context_visual", "same_context_table", "same_context_figure"}
+                if edge_types & strong_edges:
+                    relation_score = max(relation_score, 0.22)
+                elif edge_types & {"same_section", "section_multimodal_peer"}:
+                    relation_score = max(relation_score, 0.12)
+
+        coverage = 0.0
+        if intent["table"] and (node_type == "table" or "table" in neighbor_types):
+            coverage += 0.24
+        if intent["figure"] and (node_type in {"figure", "caption"} or {"figure", "caption"} & neighbor_types):
+            coverage += 0.24
+        if intent["cross"]:
+            covered = {node_type, *neighbor_types} & {"text", "table", "figure", "caption"}
+            if "text" in covered and covered & {"table", "figure", "caption"}:
+                coverage += 0.22
+            if "table" in covered and covered & {"figure", "caption"}:
+                coverage += 0.14
+        scores[node_id] = max(0.0, min(1.0, node_score + relation_score + coverage))
+    return scores
+
+
+def adaptive_modality_signal_weight(question: dict[str, Any], modality_raw: dict[str, float]) -> float:
+    if not any(score > 0 for score in modality_raw.values()):
+        return 0.0
+    intent = question_intent(question)
+    if intent["cross"] and (intent["table"] or intent["figure"]):
+        return 0.18
+    if intent["table"] and intent["figure"]:
+        return 0.17
+    if intent["table"] or intent["figure"]:
+        return 0.14
+    if intent["visual"]:
+        return 0.10
+    return 0.0
 
 
 def visual_grounding_scores(
@@ -2114,10 +2677,12 @@ def query_modality_profile(question: dict[str, Any]) -> dict[str, dict[str, floa
     qtype = clean_text(question.get("question_type"))
     query = clean_text(question.get("question")).lower()
     structured_table = is_structured_table_reasoning(question)
+    intent = question_intent(question)
 
-    wants_table = "表格" in qtype or "table" in query or "表 " in query or "表" in query
+    wants_table = intent["table"] or "表格" in qtype or "table" in query or "表 " in query or "表" in query
     wants_figure = (
-        "图表" in qtype
+        intent["figure"]
+        or "图表" in qtype
         or "图文" in qtype
         or "figure" in query
         or "fig." in query
@@ -2125,8 +2690,8 @@ def query_modality_profile(question: dict[str, Any]) -> dict[str, dict[str, floa
         or "图" in query
         or "chart" in query
     )
-    wants_cross = "跨模态" in qtype or ("结合" in query and (wants_table or wants_figure))
-    wants_location = "证据定位" in qtype or "定位" in query or "页" in query
+    wants_cross = intent["cross"] or "跨模态" in qtype or ("结合" in query and (wants_table or wants_figure))
+    wants_location = intent["location"] or "证据定位" in qtype or "定位" in query or "页" in query
 
     node_type_weights = {"text": 1.0, "caption": 0.8, "table": 0.5, "figure": 0.5, "page": 0.1}
     edge_type_weights = dict(BASE_EDGE_TYPE_WEIGHTS)
@@ -2171,11 +2736,20 @@ def query_modality_profile(question: dict[str, Any]) -> dict[str, dict[str, floa
 def graph_signal_multipliers(question: dict[str, Any]) -> dict[str, float]:
     qtype = clean_text(question.get("question_type"))
     query = clean_text(question.get("question")).lower()
+    intent = question_intent(question)
 
     if is_structured_table_reasoning(question):
         return {"ppr": 0.1, "bridge": 0.25}
     if "文本事实" in qtype or "证据定位" in qtype:
         return {"ppr": 0.0, "bridge": 0.0}
+    if intent["cross"] and (intent["table"] or intent["figure"]):
+        return {"ppr": 0.75, "bridge": 1.0}
+    if intent["table"] and intent["figure"]:
+        return {"ppr": 0.85, "bridge": 1.0}
+    if intent["table"]:
+        return {"ppr": 0.8, "bridge": 0.85}
+    if intent["figure"]:
+        return {"ppr": 0.75, "bridge": 0.85}
     if "表格" in qtype or "table" in query or "表" in query:
         return {"ppr": 1.0, "bridge": 0.8}
     if "图表理解" in qtype or "chart" in query:
@@ -2192,11 +2766,18 @@ def graph_signal_multipliers(question: dict[str, Any]) -> dict[str, float]:
 def reference_signal_multiplier(question: dict[str, Any]) -> float:
     qtype = clean_text(question.get("question_type"))
     query = clean_text(question.get("question")).lower()
+    intent = question_intent(question)
 
     if is_structured_table_reasoning(question):
         return 0.8 if extract_document_refs(question.get("question", "")) else 0.0
     if "文本事实" in qtype or "证据定位" in qtype:
         return 0.0
+    if intent["table"] and intent["figure"]:
+        return 1.2
+    if intent["table"]:
+        return 1.3
+    if intent["figure"]:
+        return 1.1
     if "表格" in qtype or "table" in query or "表" in query:
         return 1.5
     if "图表理解" in qtype or "chart" in query:
@@ -2223,6 +2804,7 @@ def retrieve_candidates(
     hybrid_alpha: float = 0.7,
     kg_index: dict[str, Any] | None = None,
     precomputed_embedding_scores: dict[str, float] | None = None,
+    context_expansion: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
     doc_id = clean_text(question.get("doc_id"))
     pool = _scorable_nodes(nodes)
@@ -2244,7 +2826,11 @@ def retrieve_candidates(
         precomputed_embedding_scores=precomputed_embedding_scores,
     )
     ranked = sorted(pool, key=lambda node: score_by_id.get(node["node_id"], 0.0), reverse=True)
-    return ranked[:top_k], score_by_id
+    candidate_ids = [node["node_id"] for node in ranked[:top_k]]
+    if context_expansion:
+        candidate_ids, score_by_id = expand_candidates_by_context(question, pool, candidate_ids, score_by_id, top_k)
+    nodes_by_id = nodes_by_id_cached(pool)
+    return [nodes_by_id[node_id] for node_id in candidate_ids if node_id in nodes_by_id], score_by_id
 
 
 def ppr_scores(
@@ -2298,7 +2884,16 @@ def bridge_scores(
 
     profile = query_modality_profile(question)
     node_type_weights = profile["node_type_weights"]
-    edge_type_weights = profile["edge_type_weights"]
+    edge_type_weights = dict(profile["edge_type_weights"])
+    intent = question_intent(question)
+    if intent["table"] and not (intent["figure"] or intent["cross"]):
+        for edge_type in (
+            "same_context_visual",
+            "same_context_table",
+            "same_context_figure",
+            "section_multimodal_peer",
+        ):
+            edge_type_weights[edge_type] = min(edge_type_weights.get(edge_type, 0.0), 0.03)
     target_total = sum(node_type_weights.get(modality, 0.0) for modality in modalities)
     target_total = max(1.0, target_total)
 
@@ -2366,10 +2961,15 @@ def rank_question(
     hybrid_alpha: float = 0.7,
     kg_index: dict[str, Any] | None = None,
     precomputed_embedding_scores: dict[str, float] | None = None,
+    context_expansion: bool = False,
+    adaptive_rerank_boost: bool = False,
+    graph_context_boost: bool = False,
 ) -> list[dict[str, Any]]:
     start = time.perf_counter()
     nodes_by_id = nodes_by_id_cached(nodes)
     graph = build_graph(nodes, edges)
+    source_route_by_id: dict[str, str] = {}
+    route_rank_by_id: dict[str, str] = {}
 
     if candidate_rows:
         candidate_ids = [row["node_id"] for row in candidate_rows if row.get("node_id") in nodes_by_id]
@@ -2378,6 +2978,16 @@ def rank_question(
             row["node_id"]: as_float(row.get("score") or row.get("sim_score"), 0.0)
             for row in candidate_rows
             if row.get("node_id") in nodes_by_id
+        }
+        source_route_by_id = {
+            row["node_id"]: clean_text(row.get("source_routes"))
+            for row in candidate_rows
+            if row.get("node_id") in nodes_by_id and clean_text(row.get("source_routes"))
+        }
+        route_rank_by_id = {
+            row["node_id"]: clean_text(row.get("route_ranks"))
+            for row in candidate_rows
+            if row.get("node_id") in nodes_by_id and clean_text(row.get("route_ranks"))
         }
         # Candidate generation already computed retrieval similarity over the full corpus.
         # Reusing those scores avoids an expensive full-corpus fusion pass per question.
@@ -2418,8 +3028,32 @@ def rank_question(
         )
         candidate_ids = [node["node_id"] for node in candidate_nodes]
         original_scores = {node_id: candidate_scores.get(node_id, sim_scores.get(node_id, 0.0)) for node_id in candidate_ids}
+        source_routes_obj = question.get("_multiroute_source_routes") or {}
+        route_ranks_obj = question.get("_multiroute_route_ranks") or {}
+        source_routes_items = source_routes_obj.items() if isinstance(source_routes_obj, dict) else []
+        route_ranks_items = route_ranks_obj.items() if isinstance(route_ranks_obj, dict) else []
+        source_route_by_id = {
+            node_id: clean_text(route)
+            for node_id, route in source_routes_items
+            if node_id in nodes_by_id and clean_text(route)
+        }
+        route_rank_by_id = {
+            node_id: clean_text(route)
+            for node_id, route in route_ranks_items
+            if node_id in nodes_by_id and clean_text(route)
+        }
 
     candidate_ids = list(dict.fromkeys(node_id for node_id in candidate_ids if node_id in nodes_by_id))
+    if context_expansion:
+        candidate_ids, original_scores = expand_candidates_by_context(
+            question,
+            nodes,
+            candidate_ids,
+            original_scores,
+            max(top_k * 5, len(candidate_ids)),
+        )
+        candidate_ids = list(dict.fromkeys(node_id for node_id in candidate_ids if node_id in nodes_by_id))
+        sim_scores.update({node_id: original_scores.get(node_id, sim_scores.get(node_id, 0.0)) for node_id in candidate_ids})
 
     sim_norm = normalize_scores(sim_scores, candidate_ids)
     ppr_raw = ppr_scores(graph, candidate_ids, sim_scores)
@@ -2430,6 +3064,12 @@ def rank_question(
     ref_norm = normalize_scores(ref_raw, candidate_ids)
     visual_raw = visual_grounding_scores(question, nodes_by_id, graph, candidate_ids)
     visual_norm = normalize_scores(visual_raw, candidate_ids)
+    modality_raw = (
+        adaptive_modality_alignment_scores(question, nodes_by_id, graph, candidate_ids)
+        if adaptive_rerank_boost
+        else {node_id: 0.0 for node_id in candidate_ids}
+    )
+    modality_norm = normalize_scores(modality_raw, candidate_ids)
     chain_raw = chain_coherence_scores(question, nodes_by_id, graph, candidate_ids, sim_scores)
     chain_norm = normalize_scores(chain_raw, candidate_ids)
     domain_raw = after_sales_domain_scores(question, nodes_by_id, candidate_ids)
@@ -2444,11 +3084,27 @@ def rank_question(
     graph_mix = graph_signal_multipliers(question)
     ppr_multiplier = max(0.0, min(1.0, graph_mix.get("ppr", 0.0)))
     bridge_multiplier = max(0.0, min(1.0, graph_mix.get("bridge", 0.0)))
+    effective_lambda_p = lambda_p
+    effective_lambda_b = lambda_b
+    if graph_context_boost:
+        graph_intent = question_intent(question)
+        if graph_intent["table"] and not (graph_intent["figure"] or graph_intent["cross"]):
+            effective_lambda_p = lambda_p
+            effective_lambda_b = lambda_b
+        elif graph_intent["visual"] or graph_intent["table"] or graph_intent["figure"] or graph_intent["cross"]:
+            effective_lambda_p = max(effective_lambda_p, 0.035)
+            effective_lambda_b = max(effective_lambda_b, 0.17)
+        elif is_multihop_reasoning(question):
+            effective_lambda_p = max(effective_lambda_p, 0.07)
+            effective_lambda_b = max(effective_lambda_b, 0.18)
+        else:
+            effective_lambda_p = max(effective_lambda_p, 0.02)
+            effective_lambda_b = max(effective_lambda_b, 0.15)
     g2_beta = beta * ppr_multiplier
     g2_alpha = alpha + beta * (1.0 - ppr_multiplier)
-    g3_p = lambda_p * ppr_multiplier
-    g3_b = lambda_b * bridge_multiplier
-    g3_s = lambda_s + lambda_p * (1.0 - ppr_multiplier) + lambda_b * (1.0 - bridge_multiplier)
+    g3_p = effective_lambda_p * ppr_multiplier
+    g3_b = effective_lambda_b * bridge_multiplier
+    g3_s = lambda_s + effective_lambda_p * (1.0 - ppr_multiplier) + effective_lambda_b * (1.0 - bridge_multiplier)
     ref_multiplier = max(0.0, reference_signal_multiplier(question))
     g3_r = min(lambda_r * ref_multiplier if any(score > 0 for score in ref_raw.values()) else 0.0, max(0.0, g3_s))
     g3_s = max(0.0, g3_s - g3_r)
@@ -2463,6 +3119,7 @@ def rank_question(
     }
     visual_weight = visual_signal_weight(question, visual_raw)
     chain_weight = chain_signal_weight(question, chain_raw)
+    modality_weight = adaptive_modality_signal_weight(question, modality_raw) if adaptive_rerank_boost else 0.0
     domain_weight = after_sales_signal_weight(question, domain_raw)
     product_weight = product_signal_weight(question, product_raw)
     kg_weight = kg_signal_weight(question, kg_raw, kg_index)
@@ -2479,12 +3136,27 @@ def rank_question(
     )
     if any(score > 0 for score in domain_raw.values()):
         domain_weight = max(as_float(adaptive_profile.get("domain_min"), 0.0), domain_weight)
+    if adaptive_rerank_boost:
+        boosted_profile = adaptive_rag_route(question)
+        if boosted_profile in {"visual_grounding", "cross_modal"}:
+            visual_weight = max(visual_weight, 0.16)
+            chain_weight = max(chain_weight, 0.12)
+        elif boosted_profile == "structured_table":
+            chain_weight = max(chain_weight, 0.06)
+            modality_weight = max(modality_weight, 0.11)
+        elif question_intent(question)["visual"]:
+            visual_weight = max(visual_weight, 0.12)
+            modality_weight = max(modality_weight, 0.10)
     if any(score > 0 for score in product_raw.values()):
         product_weight = max(as_float(adaptive_profile.get("product_min"), 0.0), product_weight)
     kg_weight = min(
         as_float(adaptive_profile.get("kg_max"), kg_weight),
         max(as_float(adaptive_profile.get("kg_min"), 0.0), kg_weight) if any(score > 0 for score in kg_raw.values()) else kg_weight,
     )
+    if graph_context_boost and any(score > 0 for score in chain_raw.values()):
+        chain_weight = max(chain_weight, 0.09 if question_intent(question)["visual"] else 0.055)
+    if graph_context_boost and any(score > 0 for kg in (kg_raw, ppr_raw, bridge_raw) for score in kg.values()):
+        kg_weight = max(kg_weight, 0.025 if any(score > 0 for score in kg_raw.values()) else kg_weight)
     model_rerank_weight = min(as_float(adaptive_profile.get("model_max"), model_rerank_weight), model_rerank_weight)
     g4_scores: dict[str, float] = {}
     domain_blend = min(0.22, domain_weight * 2.0) if domain_weight > 0 else 0.0
@@ -2495,6 +3167,7 @@ def rank_question(
         raw_score = (
             base
             + visual_weight * visual_norm.get(node_id, 0.0) * remaining
+            + modality_weight * modality_norm.get(node_id, 0.0) * remaining
             + chain_weight * chain_norm.get(node_id, 0.0) * remaining
             + domain_weight * domain_norm.get(node_id, 0.0) * remaining
             + product_weight * product_norm.get(node_id, 0.0) * remaining
@@ -2569,9 +3242,14 @@ def rank_question(
                     "rerank_profile": (
                         f"route={adaptive_route};anchor={retrieval_anchor:.3f};"
                         f"visual={visual_weight:.3f};chain={chain_weight:.3f};"
+                        f"modal={modality_weight:.3f};"
                         f"after_sales={domain_weight:.3f};product={product_weight:.3f};"
-                        f"kg={kg_weight:.3f};model_rerank={model_rerank_weight:.3f}"
+                        f"kg={kg_weight:.3f};model_rerank={model_rerank_weight:.3f};"
+                        f"context_expansion={int(context_expansion)};"
+                        f"adaptive_boost={int(adaptive_rerank_boost)};graph_boost={int(graph_context_boost)}"
                     ),
+                    "source_routes": source_route_by_id.get(node_id, ""),
+                    "route_ranks": route_rank_by_id.get(node_id, ""),
                     "has_visual_crop": int(node_has_visual_crop(node)),
                     "has_visual_caption": int(node_has_visual_caption(node)),
                     "visual_title": preview(node.get("visual_title", ""), 80),

@@ -46,6 +46,13 @@ def extract_refs(text: str) -> set[tuple[str, str]]:
     return refs
 
 
+def source_context_ref(source_ref: Any) -> str:
+    source_ref = clean_text(source_ref)
+    if not source_ref:
+        return ""
+    return re.sub(r"/(?:figure|fig|table|caption|image)_?\d+[A-Za-z-]*$", "", source_ref, flags=re.I)
+
+
 def parse_bbox(value: Any) -> list[float]:
     if not value:
         return []
@@ -92,9 +99,10 @@ def layout_related(caption: dict[str, Any], target: dict[str, Any]) -> bool:
     return horizontal_overlap(caption_bbox, target_bbox) >= 0.03 and vertical_gap(caption_bbox, target_bbox) <= page_height * 0.45
 
 
-def build_edges(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_edges(nodes: list[dict[str, Any]], enhanced_context_edges: bool = False) -> list[dict[str, Any]]:
     by_doc_page: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     by_doc_section: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    by_source_context: dict[str, list[dict[str, Any]]] = defaultdict(list)
     by_doc_kind_ref: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     page_nodes: dict[tuple[str, str], str] = {}
 
@@ -106,6 +114,9 @@ def build_edges(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         by_doc_page[(doc_id, page)].append(node)
         if section and node_type != "page":
             by_doc_section[(doc_id, section)].append(node)
+        source_context = source_context_ref(node.get("source_ref"))
+        if source_context and node_type != "page":
+            by_source_context[source_context].append(node)
         if node_type == "page":
             page_nodes[(doc_id, page)] = node.get("node_id", "")
         for kind, ref_no in extract_refs(node.get("content", "") + " " + node.get("source_ref", "")):
@@ -152,6 +163,35 @@ def build_edges(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 add_edge(edges, title.get("node_id", ""), node.get("node_id", ""), "section_title", 0.35)
         for left, right in zip(content_nodes, content_nodes[1:]):
             add_edge(edges, left.get("node_id", ""), right.get("node_id", ""), "same_section", 0.12)
+        if enhanced_context_edges:
+            texts = [node for node in content_nodes if node.get("node_type") == "text"]
+            visuals = [node for node in content_nodes if node.get("node_type") in {"table", "figure", "caption"}]
+            for text_node in texts[:24]:
+                for visual in visuals[:24]:
+                    if clean_text(text_node.get("page")) != clean_text(visual.get("page")):
+                        continue
+                    visual_type = clean_text(visual.get("node_type"))
+                    edge_type = "same_context_table" if visual_type == "table" else "same_context_figure"
+                    add_edge(edges, text_node.get("node_id", ""), visual.get("node_id", ""), edge_type, 0.24)
+            for left, right in itertools.combinations(visuals[:24], 2):
+                if clean_text(left.get("page")) == clean_text(right.get("page")):
+                    add_edge(edges, left.get("node_id", ""), right.get("node_id", ""), "section_multimodal_peer", 0.18)
+
+    if enhanced_context_edges:
+        for source_context_group in by_source_context.values():
+            if len(source_context_group) < 2:
+                continue
+            for left, right in itertools.combinations(source_context_group[:36], 2):
+                left_type = clean_text(left.get("node_type"))
+                right_type = clean_text(right.get("node_type"))
+                if {left_type, right_type} <= {"text"}:
+                    add_edge(edges, left.get("node_id", ""), right.get("node_id", ""), "same_context_text", 0.2)
+                elif "table" in {left_type, right_type}:
+                    add_edge(edges, left.get("node_id", ""), right.get("node_id", ""), "same_context_table", 0.62)
+                elif {"figure", "caption"} & {left_type, right_type}:
+                    add_edge(edges, left.get("node_id", ""), right.get("node_id", ""), "same_context_figure", 0.62)
+                else:
+                    add_edge(edges, left.get("node_id", ""), right.get("node_id", ""), "same_context_visual", 0.48)
 
     for node in nodes:
         node_id = node.get("node_id")
@@ -180,11 +220,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build document graph edges from parsed evidence nodes.")
     parser.add_argument("--nodes", default=str(DEFAULT_NODES.relative_to(DEFAULT_NODES.parents[2])))
     parser.add_argument("--output", default=str(DEFAULT_EDGES.relative_to(DEFAULT_EDGES.parents[2])))
+    parser.add_argument(
+        "--enhanced-context-edges",
+        action="store_true",
+        help="Add stronger same-context text/table/figure edges for GraphRAG evidence-chain experiments.",
+    )
     args = parser.parse_args()
 
     ensure_project_dirs()
     nodes = read_jsonl(args.nodes)
-    edges = build_edges(nodes)
+    edges = build_edges(nodes, enhanced_context_edges=args.enhanced_context_edges)
     write_jsonl(args.output, edges)
     copy_jsonl_alias(args.output, LEGACY_EDGES)
     print(f"Wrote {len(edges)} edges to {resolve_path(args.output)}")
