@@ -23,9 +23,9 @@ from backend.services.script_modules import (
 from backend.services.visual import build_backend_captioner
 from backend.utils.files import write_csv_dicts
 
-from embedding_index import DEFAULT_EMBEDDING_BATCH_SIZE, DEFAULT_EMBEDDING_DEVICE, DEFAULT_EMBEDDING_MODEL
-from pipeline_common import clean_text, normalize_doc_id, write_jsonl
-from rerank_lib import answer_for_question, build_graph, rank_question
+from multirank_rag.common import clean_text, normalize_doc_id, write_jsonl
+from multirank_rag.rerank import answer_for_question, rank_question
+from multirank_rag.retrieval import DEFAULT_EMBEDDING_BATCH_SIZE, DEFAULT_EMBEDDING_DEVICE, DEFAULT_EMBEDDING_MODEL, build_graph
 
 
 def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_template: str = "auto") -> None:

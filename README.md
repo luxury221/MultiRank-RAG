@@ -15,6 +15,7 @@ MultiRank-RAG 的目标不是只返回一个答案，而是从复杂文档中检
 - **GraphRAG 结构推理**：构建文档结构边、跨模态邻接边、实体关系、语义关系和 community summary，让系统能够处理跨页、跨图表、跨章节的问题。
 - **MultiRank 重排序**：提供 G0-G4 / V0-V4 消融框架，逐步加入语义相似、图传播、bridge evidence、reference matching、视觉 grounding 和证据链约束。
 - **证据链自我修正**：在主线检索结果与多路召回结果之间做二次验证，优先保留稳定 Top evidence，只在证据缺模态或置信不足时合并/替换候选。
+- **查询规划与答案自修正**：在召回前生成 Query Plan，显式选择 text/table/visual/graph 路线；答案生成后按证据链过滤低支持句子并补全必要视觉标记。
 - **前后端闭环**：FastAPI 后端支持 PDF 上传、解析、检索、证据链生成；React 前端支持文档选择、提问、答案展示、证据卡片与相关性排序。
 - **可评测、可消融、可复现**：提供从数据准备、检索评测、证据链评测到实验汇总 Excel 的脚本，方便定位每个模块的真实贡献。
 
@@ -48,7 +49,11 @@ PDF / Manual / Knowledge Base
    embedding + BM25 + lexical + visual + table + KG + section routes
         |
         v
-6. MultiRank Reranking
+6. Query Planner
+   text precision / table first / visual first / graph bridge / cross-modal bridge
+        |
+        v
+7. MultiRank Reranking
    G0 raw retrieval
    G1 semantic rerank
    G2 semantic + graph propagation
@@ -56,12 +61,12 @@ PDF / Manual / Knowledge Base
    G4 adaptive multimodal evidence rerank
         |
         v
-7. Evidence Self-Correction
+8. Evidence Self-Correction
    primary / fallback / merge verifier
    modality guard + chain completeness check
         |
         v
-8. Grounded Answer & Evidence Card
+9. Answer Self-Correction & Evidence Card
    cited answer, <PIC:node_id> visual markers,
    evidence chain, ranked support evidence, frontend visualization
 ```
@@ -141,7 +146,30 @@ GraphRAG 层把文档从一组孤立 chunk 扩展为可推理图：
 
 多路召回结果通过融合策略进入候选池，既保证覆盖率，又避免单一 embedding 或单一 BM25 的偏差。
 
-### 7. MultiRank 重排序
+### 7. Query Planner 查询规划
+
+系统会在召回和重排序前生成一份确定性的 Query Plan：
+
+```text
+general_text / text_precision
+table_first
+visual_first
+cross_modal_bridge
+graph_bridge
+policy_or_manual
+```
+
+Query Plan 会显式给出：
+
+- 问题路线：文本精确、表格优先、视觉优先、跨模态桥接、GraphRAG 多跳等
+- 需要的证据模态：text、table、figure、caption
+- 多路召回权重：embedding、BM25、visual、table、KG、section、reference
+- 是否启用同页/同节上下文扩展
+- 答案要求：保留 `<PIC:node_id>`、解释表格依据、展示推理路径、避免无证据政策话术
+
+这样召回、重排序和答案生成共享同一份规划，不再各自猜测问题类型。
+
+### 8. MultiRank 重排序
 
 MultiRank 是项目的核心排序框架。当前主线使用 G0-G4 分层消融：
 
@@ -160,7 +188,7 @@ G4 会根据问题类型自动调整权重。例如：
 - 跨文档/跨页面问题提高 GraphRAG 和 bridge evidence 权重
 - 普通文本问答保留语义相似和关键词匹配的稳定性
 
-### 8. 证据链生成与自我修正
+### 9. 证据链生成与自我修正
 
 系统会从 Top evidence 中组织固定长度证据链，而不是只输出分数最高的一个 chunk。证据链包含：
 
@@ -181,7 +209,7 @@ action           = primary / fallback / merge
 
 默认策略是优先保留主线排序，只在缺少必要模态或证据链不完整时合并 fallback 的图片、表格或 bridge evidence。这比简单替换整套结果更稳定。
 
-### 9. 回答生成与证据卡片
+### 10. 回答生成、答案自修正与证据卡片
 
 最终答案由证据链驱动生成，支持：
 
@@ -191,6 +219,13 @@ action           = primary / fallback / merge
 - 多步证据链
 - 前端横版证据卡片
 - 右侧相关性排序展示
+
+答案生成后会经过 answer self-correction：
+
+- 逐句计算答案与证据链文本/视觉摘要/表格摘要的支持度
+- 保守移除低支持、疑似幻觉的长句
+- 视觉或表格问题自动补全 `<PIC:node_id>` 标记
+- 在输出中记录 `self_correction_status`、删除句子数和平均支持度
 
 前端页面重点不是聊天框，而是“问题 -> 答案 -> 证据链 -> 相关性排序”的可解释闭环。
 
@@ -212,11 +247,57 @@ ABECD + Evidence Guard + SelfCorrect merge-v2
 - Guard：证据链完整性约束
 - SelfCorrect：主线结果与多路召回结果的二次验证和合并
 
-在当前 100 题抽样实验中，`SelfCorrect merge-v2` 相比主线提升了 Recall@1、Recall@5、MRR、nDCG@5 和证据链分数，是目前最稳的默认方案。
+历史 100 题抽样实验中，`SelfCorrect merge-v2` 相比主线提升了 Recall@1、Recall@5、MRR、nDCG@5 和证据链分数，是目前最稳的默认方案。
+
+## 当前消融实验结果
+
+仓库当前提交一份可复现的轻量消融快照，用于验证主链路是否完整。实验使用内置 `data/sample`，共 5 个问题，检索器固定为 `bm25`，候选数 `candidate-k=10`，重排序保留 `rerank-k=3`，避免外部 API、embedding 缓存和大模型生成对结果造成干扰。
+
+运行命令：
+
+```bash
+python scripts/40_run_main_experiment.py \
+  --dataset-name sample \
+  --run-name readme_ablation_20260519 \
+  --variants V0,V1,V2,V3,V4 \
+  --retriever bm25 \
+  --candidate-k 10 \
+  --rerank-k 3 \
+  --build-chains \
+  --answer-provider none \
+  --clean
+```
+
+结果摘要：
+
+| Variant | 说明 | Recall@1 | Recall@5 | MRR | nDCG@5 | Evidence Hit | Modality Hit |
+|---|---|---:|---:|---:|---:|---:|---:|
+| V0 | text-only baseline | 0.600 | 0.800 | 0.700 | 0.726 | 0.800 | 0.400 |
+| V1 | + structured evidence nodes | 0.600 | 1.000 | 0.767 | 0.826 | 1.000 | 1.000 |
+| V2 | + visual evidence fields | 0.600 | 1.000 | 0.767 | 0.826 | 1.000 | 1.000 |
+| V3 | + GraphRAG retrieval signal | 0.600 | 1.000 | 0.767 | 0.826 | 1.000 | 1.000 |
+| V4 | full MultiRank-RAG evidence chain | 0.800 | 1.000 | 0.900 | 0.926 | 1.000 | 1.000 |
+
+V4 证据链评测：
+
+| 指标 | 数值 |
+|---|---:|
+| chain_present | 1.000 |
+| avg_step_count | 5.000 |
+| gold_node_coverage | 1.000 |
+| gold_page_hit | 1.000 |
+| gold_modality_coverage | 1.000 |
+| visual_grounding_hit | 0.400 |
+| cross_modal_hit | 1.000 |
+| relation_support | 1.000 |
+| evidence_chain_score | 0.916 |
+
+这组结果说明：结构化 evidence node 带来了最明显的 Recall@5 与模态覆盖提升，V4 的 G4 重排序进一步改善 Top1、MRR 与 nDCG@5；当前短板仍是更细粒度的视觉 grounding。
 
 ## 目录结构
 
 ```text
+multirank_rag/  正式 Python package，提供 parsing/graph/vision/retrieval/rerank/evidence/evaluation 等稳定接口
 backend/      FastAPI 后端包，按 routers/services/schemas/jobs/config/utils 拆分
 web/          React + Vite 前端，负责文档选择、提问、证据卡片和相关性展示
 scripts/      CLI 工作台，保留稳定入口，并按主链路/评测/数据/历史工具分类
@@ -237,6 +318,20 @@ backend/schemas/               Pydantic 请求/响应模型
 backend/jobs/                  上传任务状态、日志、运行目录
 backend/services/              PDF/RAG pipeline、检索、视觉增强、前端结果序列化
 backend/utils/                 文件名、CSV 等小工具
+```
+
+核心包结构：
+
+```text
+multirank_rag/common.py        路径、CSV/JSONL、文本清洗等通用工具
+multirank_rag/parsing/         PDF 解析与结构化 chunk 接口
+multirank_rag/graph/           文档结构图与 GraphRAG 接口
+multirank_rag/vision/          OCR、caption、visual evidence 接口
+multirank_rag/retrieval/       embedding index、混合召回、KG index 接口
+multirank_rag/rerank/          MultiRank G0-G4 重排序接口
+multirank_rag/evidence/        证据链与证据卡片接口
+multirank_rag/evaluation/      检索与证据链评测接口
+multirank_rag/models/          Ark、Xinference、OpenAI-compatible 模型网关接口
 ```
 
 重要文档：

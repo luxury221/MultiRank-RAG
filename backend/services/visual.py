@@ -4,7 +4,7 @@ from backend.config import VISUAL_CAPTION_PROVIDERS, env_float, env_value
 from backend.jobs.store import append_log
 from backend.services.script_modules import visual_evidence
 
-from pipeline_common import clean_text
+from multirank_rag.common import clean_text
 
 
 def default_backend_visual_caption_provider() -> str:

@@ -12,9 +12,10 @@ backend/schemas/               Pydantic request/response schemas
 backend/jobs/                  Upload job directories, status files, logs
 backend/services/              PDF/RAG pipeline, retrieval, visual caption, frontend serialization
 backend/utils/                 Small reusable helpers
+multirank_rag/                 Stable package imports for core RAG capabilities
 ```
 
-The route layer is intentionally thin. Heavy work such as parsing, visual evidence enrichment, GraphRAG indexing, retrieval, reranking, evidence-chain generation, and card generation lives in `backend/services/`.
+The route layer is intentionally thin. Heavy work such as parsing, visual evidence enrichment, GraphRAG indexing, retrieval, reranking, evidence-chain generation, and card generation is orchestrated in `backend/services/` and imported through the stable `multirank_rag/` package boundary.
 
 ## Responsibilities
 

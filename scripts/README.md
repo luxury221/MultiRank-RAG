@@ -1,10 +1,10 @@
 # Scripts
 
-`scripts/` is the command-line layer for MultiRank-RAG. It contains maintained pipeline entrypoints, evaluation tools, dataset preparation helpers, and historical research utilities.
+`scripts/` is the command-line layer for MultiRank-RAG. It contains maintained pipeline entrypoints, evaluation tools, and dataset preparation helpers.
 
 For a categorized file-by-file index, see [CATALOG.md](CATALOG.md).
 
-The root-level script paths are kept stable so existing experiment commands still work. Shared production-facing API behavior lives in `backend/`, while long-running research workflows remain here as explicit CLI tools.
+The root-level script paths are kept stable so existing experiment commands still work. Shared production-facing imports live in `multirank_rag/`, API behavior lives in `backend/`, while long-running research workflows remain here as explicit CLI tools.
 
 ## Main Entry
 
@@ -47,13 +47,12 @@ Useful options:
 
 ```text
 Core pipeline       01, 02, 03, 04, 06, 09, 10, 11, 23, 34, 40, 42, 52
-Shared libraries    pipeline_common.py, embedding_index.py, rerank_lib.py, ark_clients.py
-Evaluation          05, 08, 12_evaluate, 14, 24_ablate, 50
-Data preparation    07, 19, 22, 27, 28, 41
-Historical tools    DataFountain/competition-specific generators and diagnostics
+Shared libraries    pipeline_common.py, embedding_index.py, rerank_lib.py, ark_clients.py, query_expansion.py
+Evaluation          05, 08, 12_evaluate, 14, 50
+Data preparation    07, 41
 ```
 
-Historical scripts are kept for reproducibility, but the recommended user-facing path is the main pipeline plus backend/frontend.
+The recommended user-facing path is the main pipeline plus backend/frontend.
 
 ## Main Experiment
 
@@ -116,8 +115,6 @@ See `docs/MODEL_GATEWAY.md` for complete examples.
 05_evaluate.py                  Retrieval/rerank metrics
 08_compare_methods.py           Compare G methods by question type
 14_chunk_quality_report.py      Chunk quality report
-24_ablate_retrieval.py          Retrieval ablation
-31_diagnose_submission_quality.py  Output quality diagnosis
 ```
 
 Generated artifacts are written to `outputs/` and are ignored by Git by default.

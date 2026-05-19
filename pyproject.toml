@@ -28,7 +28,7 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["backend*"]
+include = ["backend*", "multirank_rag*"]
 exclude = ["data*", "docs*", "outputs*", "external*", "web*"]
 
 [tool.pytest.ini_options]

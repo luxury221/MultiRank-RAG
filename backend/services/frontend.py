@@ -6,7 +6,7 @@ from typing import Any
 from backend.config import ROOT
 from backend.jobs.store import job_dir
 
-from pipeline_common import clean_text, preview
+from multirank_rag.common import clean_text, preview
 
 
 def rel_file_url(job_id: str, path: str | Path) -> str:

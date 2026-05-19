@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pipeline_common import clean_text, write_csv
+from multirank_rag.common import write_csv
 
 
 def infer_question_type(question: str) -> str:

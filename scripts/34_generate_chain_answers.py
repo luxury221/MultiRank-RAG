@@ -10,6 +10,7 @@ from typing import Any
 
 from ark_clients import create_chat_client
 from pipeline_common import clean_text, preview, read_jsonl, resolve_path, write_csv, write_jsonl
+from rerank_lib import self_correct_answer
 
 
 PROMPT_VERSION = "chain-answer-v1"
@@ -24,6 +25,9 @@ ANSWER_FIELDS = [
     "model",
     "status",
     "latency_ms",
+    "self_correction_status",
+    "self_correction_removed_sentences",
+    "self_correction_notes",
     "evidence_count",
     "visual_evidence_count",
     "evidence_node_ids",
@@ -274,6 +278,12 @@ def generate_one(
             status = f"error_fallback: {type(exc).__name__}: {str(exc)[:160]}"
         append_cache(cache_path, {"cache_key": key, "answer": answer, "status": status})
 
+    correction = self_correct_answer(chain, answer, steps)
+    answer = clean_text(correction.get("answer")) or answer
+    correction_status = clean_text(correction.get("status"))
+    if correction_status and correction_status not in {"verified", "disabled"}:
+        status = f"{status};answer_self_correction={correction_status}"
+
     latency_ms = round((time.perf_counter() - start) * 1000, 3)
     visual_count = sum(1 for step in steps if step_is_visual(step))
     return {
@@ -286,6 +296,9 @@ def generate_one(
         "model": model,
         "status": status,
         "latency_ms": latency_ms,
+        "self_correction_status": correction_status,
+        "self_correction_removed_sentences": int(correction.get("removed_sentences") or 0),
+        "self_correction_notes": clean_text(correction.get("notes")),
         "evidence_count": len(steps),
         "visual_evidence_count": visual_count,
         "chain_summary": clean_text(chain.get("summary")),

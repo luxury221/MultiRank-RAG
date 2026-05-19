@@ -12,7 +12,7 @@ from backend.schemas.analyze import AnalyzeResponse
 from backend.services.pipeline import run_upload_job
 from backend.utils.files import safe_filename
 
-from pipeline_common import clean_text
+from multirank_rag.common import clean_text
 
 
 router = APIRouter()

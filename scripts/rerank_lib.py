@@ -971,6 +971,11 @@ def route_weights_for_question(
         weights["table_structure"] = max(weights["table_structure"], 1.35)
         weights["layout"] = 0.0
         weights["kg"] = 0.0
+    if query_planner_enabled():
+        plan = build_query_plan(question, kg_index)
+        for route, multiplier in plan.get("route_multipliers", {}).items():
+            if route in weights:
+                weights[route] *= as_float(multiplier, 1.0)
     return {route: weights.get(route, 0.5) for route in available_routes}
 
 
@@ -2142,6 +2147,169 @@ def adaptive_g4_profile(question: dict[str, Any]) -> dict[str, float | str]:
     return profile
 
 
+def query_planner_enabled() -> bool:
+    value = os.getenv("RAG_ENABLE_QUERY_PLANNER", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def build_query_plan(question: dict[str, Any], kg_index: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Plan retrieval/reranking routes before scoring candidates.
+
+    The planner is deterministic and cheap. It does not replace the existing
+    reranker; it makes the query intent explicit so retrieval, G4 scoring, and
+    evidence generation share the same route assumptions.
+    """
+    intent = question_intent(question)
+    route = adaptive_rag_route(question)
+    refs = extract_document_refs(question.get("question", ""))
+    has_kg_entities = bool(kg_query_context(question, kg_index)["entities"]) if kg_available(kg_index) else False
+    required_modalities = ["text"]
+    if intent["table"] or route == "structured_table":
+        required_modalities.append("table")
+    if intent["figure"] or intent["location"]:
+        required_modalities.extend(["figure", "caption"])
+    if intent["cross"]:
+        required_modalities.extend(["table", "figure", "caption"])
+    required_modalities = list(dict.fromkeys(required_modalities))
+
+    route_multipliers = {
+        "embedding": 1.0,
+        "bm25": 1.0,
+        "lexical": 1.0,
+        "visual": 1.0,
+        "table_structure": 1.0,
+        "kg": 1.0,
+        "section": 1.0,
+        "reference": 1.0,
+        "layout": 1.0,
+        "product": 1.0,
+    }
+    retrieval_strategy = "balanced"
+    context_expansion = False
+    adaptive_rerank_boost = True
+    graph_context_boost = False
+    answer_requirements = ["cite_evidence"]
+
+    if route == "structured_table":
+        retrieval_strategy = "table_first"
+        route_multipliers.update(
+            {
+                "table_structure": 1.55,
+                "bm25": 1.16,
+                "lexical": 1.08,
+                "embedding": 0.92,
+                "visual": 0.35,
+                "layout": 0.2,
+                "kg": 0.3,
+            }
+        )
+        answer_requirements.extend(["preserve_numbers", "explain_table_basis"])
+    elif route == "visual_grounding":
+        retrieval_strategy = "visual_first"
+        route_multipliers.update(
+            {
+                "visual": 1.45,
+                "layout": 1.25,
+                "reference": 1.18 if refs else 1.0,
+                "table_structure": 1.22 if intent["table"] else 0.76,
+                "embedding": 1.05,
+                "section": 1.08,
+            }
+        )
+        context_expansion = True
+        answer_requirements.extend(["mention_visual_evidence", "keep_pic_marker"])
+    elif route == "cross_modal":
+        retrieval_strategy = "cross_modal_bridge"
+        route_multipliers.update(
+            {
+                "visual": 1.35,
+                "table_structure": 1.30,
+                "section": 1.25,
+                "reference": 1.20 if refs else 1.05,
+                "kg": 1.08 if has_kg_entities else 0.9,
+            }
+        )
+        context_expansion = True
+        graph_context_boost = True
+        answer_requirements.extend(["combine_modalities", "keep_pic_marker"])
+    elif route == "multihop_graph":
+        retrieval_strategy = "graph_bridge"
+        route_multipliers.update(
+            {
+                "kg": 1.45 if has_kg_entities else 1.05,
+                "section": 1.30,
+                "reference": 1.15 if refs else 1.0,
+                "embedding": 1.05,
+                "visual": 0.72,
+            }
+        )
+        context_expansion = True
+        graph_context_boost = True
+        answer_requirements.append("show_reasoning_path")
+    elif route.startswith("after_sales"):
+        retrieval_strategy = "policy_or_manual"
+        route_multipliers.update(
+            {
+                "bm25": 1.12,
+                "lexical": 1.08,
+                "section": 1.22,
+                "product": 1.20 if matched_product_groups(question) else 0.85,
+                "kg": 1.18 if has_kg_entities else 1.0,
+                "visual": 1.20 if intent["visual"] else 0.62,
+            }
+        )
+        context_expansion = bool(intent["visual"])
+        answer_requirements.extend(["actionable_steps", "avoid_unverified_policy"])
+    elif route == "text_fact":
+        retrieval_strategy = "text_precision"
+        route_multipliers.update(
+            {
+                "bm25": 1.15,
+                "lexical": 1.08,
+                "embedding": 0.92,
+                "visual": 0.35,
+                "layout": 0.35,
+                "table_structure": 0.55,
+                "kg": 0.65,
+            }
+        )
+        adaptive_rerank_boost = False
+    else:
+        route_multipliers.update({"embedding": 1.08, "bm25": 1.04, "visual": 0.72, "layout": 0.72})
+
+    if refs:
+        route_multipliers["reference"] = max(route_multipliers["reference"], 1.35)
+        context_expansion = True
+    if intent["location"]:
+        route_multipliers["layout"] = max(route_multipliers["layout"], 1.35)
+    if intent["visual"]:
+        answer_requirements.append("verify_visual_support")
+
+    return {
+        "route": route,
+        "strategy": retrieval_strategy,
+        "intent": intent,
+        "required_modalities": required_modalities,
+        "route_multipliers": route_multipliers,
+        "context_expansion": context_expansion,
+        "adaptive_rerank_boost": adaptive_rerank_boost,
+        "graph_context_boost": graph_context_boost,
+        "has_document_refs": bool(refs),
+        "has_kg_entities": has_kg_entities,
+        "answer_requirements": list(dict.fromkeys(answer_requirements)),
+    }
+
+
+def query_plan_summary(plan: dict[str, Any]) -> str:
+    if not plan:
+        return ""
+    route = clean_text(plan.get("route"))
+    strategy = clean_text(plan.get("strategy"))
+    modalities = ",".join(plan.get("required_modalities") or [])
+    requirements = ",".join(plan.get("answer_requirements") or [])
+    return f"route={route};strategy={strategy};modalities={modalities};answer={requirements}"
+
+
 def after_sales_intents(question: dict[str, Any]) -> dict[str, float]:
     blob = _question_blob(question)
     scores: dict[str, float] = {}
@@ -2812,6 +2980,9 @@ def retrieve_candidates(
         filtered = [node for node in pool if clean_text(node.get("doc_id")) == doc_id]
         if filtered:
             pool = filtered
+    query_plan = build_query_plan(question, kg_index) if query_planner_enabled() else {}
+    if query_plan:
+        question["_query_plan"] = query_plan
     score_by_id = similarity_scores(
         question,
         pool,
@@ -2827,7 +2998,7 @@ def retrieve_candidates(
     )
     ranked = sorted(pool, key=lambda node: score_by_id.get(node["node_id"], 0.0), reverse=True)
     candidate_ids = [node["node_id"] for node in ranked[:top_k]]
-    if context_expansion:
+    if context_expansion or bool(query_plan.get("context_expansion")):
         candidate_ids, score_by_id = expand_candidates_by_context(question, pool, candidate_ids, score_by_id, top_k)
     nodes_by_id = nodes_by_id_cached(pool)
     return [nodes_by_id[node_id] for node_id in candidate_ids if node_id in nodes_by_id], score_by_id
@@ -2966,6 +3137,12 @@ def rank_question(
     graph_context_boost: bool = False,
 ) -> list[dict[str, Any]]:
     start = time.perf_counter()
+    query_plan = build_query_plan(question, kg_index) if query_planner_enabled() else {}
+    if query_plan:
+        question["_query_plan"] = query_plan
+        context_expansion = context_expansion or bool(query_plan.get("context_expansion"))
+        adaptive_rerank_boost = adaptive_rerank_boost or bool(query_plan.get("adaptive_rerank_boost"))
+        graph_context_boost = graph_context_boost or bool(query_plan.get("graph_context_boost"))
     nodes_by_id = nodes_by_id_cached(nodes)
     graph = build_graph(nodes, edges)
     source_route_by_id: dict[str, str] = {}
@@ -3239,6 +3416,10 @@ def rank_question(
                     "kg_score": round(kg_norm.get(node_id, 0.0), 6),
                     "model_rerank_score": round(model_rerank_norm.get(node_id, 0.0), 6),
                     "adaptive_route": adaptive_route,
+                    "query_plan": query_plan_summary(query_plan),
+                    "query_plan_strategy": clean_text(query_plan.get("strategy", "")),
+                    "required_modalities": ",".join(query_plan.get("required_modalities") or []),
+                    "answer_requirements": ",".join(query_plan.get("answer_requirements") or []),
                     "rerank_profile": (
                         f"route={adaptive_route};anchor={retrieval_anchor:.3f};"
                         f"visual={visual_weight:.3f};chain={chain_weight:.3f};"
@@ -3324,6 +3505,171 @@ def is_mostly_english(text: Any) -> bool:
     return letters > max(20, cjk * 2)
 
 
+ANSWER_STOPWORDS = {
+    "the",
+    "and",
+    "for",
+    "with",
+    "that",
+    "this",
+    "from",
+    "are",
+    "was",
+    "were",
+    "you",
+    "your",
+    "根据",
+    "证据",
+    "当前",
+    "可以",
+    "需要",
+    "显示",
+    "说明",
+    "问题",
+}
+
+
+def answer_self_correction_enabled() -> bool:
+    value = os.getenv("RAG_ENABLE_ANSWER_SELF_CORRECTION", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _evidence_text_for_correction(rows: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for row in rows:
+        parts.extend(
+            [
+                clean_text(row.get("content_preview")),
+                clean_text(row.get("content")),
+                clean_text(row.get("visual_summary")),
+                clean_text(row.get("visual_caption")),
+                clean_text(row.get("qa_evidence")),
+                clean_text(row.get("reason")),
+                clean_text(row.get("source_ref")),
+            ]
+        )
+    return clean_text(" ".join(part for part in parts if part))
+
+
+def _answer_sentences(answer: str) -> list[str]:
+    answer = clean_text(answer)
+    if not answer:
+        return []
+    parts = re.split(r"(?<=[。！？!?；;])\s+|\n+", answer)
+    if len(parts) == 1:
+        parts = re.split(r"(?<=[。！？!?；;])", answer)
+    return [clean_text(part) for part in parts if clean_text(part)]
+
+
+def _support_terms(text: Any) -> set[str]:
+    text = clean_text(text).casefold()
+    terms = {
+        term
+        for term in re.findall(r"[a-zA-Z][a-zA-Z0-9_\-/]{2,}|\d+(?:\.\d+)?%?", text)
+        if term not in ANSWER_STOPWORDS
+    }
+    cjk_chars = [ch for ch in text if "\u4e00" <= ch <= "\u9fff"]
+    for index in range(max(0, len(cjk_chars) - 1)):
+        bigram = "".join(cjk_chars[index : index + 2])
+        if bigram not in ANSWER_STOPWORDS:
+            terms.add(bigram)
+    return terms
+
+
+def _sentence_support_score(sentence: str, evidence_text: str, question_text: str) -> float:
+    sentence_terms = _support_terms(sentence)
+    if not sentence_terms:
+        return 1.0
+    evidence_terms = _support_terms(evidence_text)
+    question_terms = _support_terms(question_text)
+    claim_terms = sentence_terms - question_terms
+    if not claim_terms:
+        claim_terms = sentence_terms
+    overlap = claim_terms & evidence_terms
+    return min(1.0, len(overlap) / max(1.0, len(claim_terms) ** 0.72))
+
+
+def _row_is_visual(row: dict[str, Any]) -> bool:
+    return bool(
+        clean_text(row.get("node_type")) in VISUAL_NODE_TYPES
+        or clean_text(row.get("crop_image_path"))
+        or clean_text(row.get("page_image_path"))
+        or clean_text(row.get("visual_summary"))
+        or clean_text(row.get("visual_caption"))
+    )
+
+
+def _first_visual_marker(rows: list[dict[str, Any]]) -> str:
+    for row in rows:
+        if not _row_is_visual(row):
+            continue
+        node_id = clean_text(row.get("node_id"))
+        return f"<PIC:{node_id}>" if node_id else "<PIC>"
+    return ""
+
+
+def self_correct_answer(
+    question: dict[str, Any],
+    answer: str,
+    evidence_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    original = clean_text(answer)
+    if not original or not answer_self_correction_enabled():
+        return {
+            "answer": original,
+            "status": "disabled" if original else "empty",
+            "removed_sentences": 0,
+            "notes": "",
+        }
+
+    evidence_text = _evidence_text_for_correction(evidence_rows)
+    if not evidence_text:
+        return {"answer": original, "status": "no_evidence_text", "removed_sentences": 0, "notes": ""}
+
+    question_text = clean_text(question.get("question"))
+    sentences = _answer_sentences(original)
+    kept: list[str] = []
+    removed: list[str] = []
+    support_scores: list[float] = []
+    for sentence in sentences:
+        score = _sentence_support_score(sentence, evidence_text, question_text)
+        support_scores.append(score)
+        has_citation = bool(re.search(r"\[E\d+\]|<PIC", sentence))
+        is_short_bridge = len(_support_terms(sentence)) <= 4
+        if score >= 0.18 or (has_citation and score >= 0.08) or is_short_bridge:
+            kept.append(sentence)
+        else:
+            removed.append(sentence)
+
+    corrected = clean_text(" ".join(kept)) if kept else original
+    # Be conservative: if filtering would erase most of the answer, keep the original
+    # and let the metadata expose the low-support warning.
+    if len(corrected) < max(24, int(len(original) * 0.45)):
+        corrected = original
+        removed = []
+        status = "kept_original_low_support"
+    else:
+        status = "corrected" if removed else "verified"
+
+    intent = question_intent(question)
+    visual_marker = _first_visual_marker(evidence_rows)
+    wants_visual_answer = intent["visual"] or any(_row_is_visual(row) for row in evidence_rows)
+    if wants_visual_answer and visual_marker and "<PIC" not in corrected:
+        corrected = clean_text(f"{corrected} {visual_marker}")
+        status = "corrected_visual_marker" if status == "verified" else status
+
+    if not re.search(r"\[E\d+\]", corrected) and any(clean_text(row.get("chain_step")) for row in evidence_rows):
+        corrected = clean_text(f"{corrected} [E1]")
+
+    avg_support = sum(support_scores) / len(support_scores) if support_scores else 1.0
+    return {
+        "answer": corrected,
+        "status": status,
+        "removed_sentences": len(removed),
+        "notes": f"avg_sentence_support={avg_support:.3f}",
+    }
+
+
 def _fallback_answer_for_question(question: dict[str, Any], top_rows: list[dict[str, Any]]) -> str:
     if not top_rows:
         return "No answer available because no evidence was retrieved."
@@ -3347,10 +3693,12 @@ def answer_for_question(question: dict[str, Any], top_rows: list[dict[str, Any]]
 
         provider = (get_env("RAG_ANSWER_PROVIDER") or get_env("RAG_MODEL_PROVIDER", "ark")).strip().lower()
         if provider in {"", "off", "none", "local", "fallback"}:
-            return _fallback_answer_for_question(question, top_rows)
+            fallback = _fallback_answer_for_question(question, top_rows)
+            return self_correct_answer(question, fallback, top_rows)["answer"]
         model = answer_model_for_provider(provider, get_env("RAG_ANSWER_MODEL", ""))
         if not model:
-            return _fallback_answer_for_question(question, top_rows)
+            fallback = _fallback_answer_for_question(question, top_rows)
+            return self_correct_answer(question, fallback, top_rows)["answer"]
         chat = create_chat_client(provider, model=model)
         language_rule = "Answer in English." if is_mostly_english(question.get("question", "")) else "请用中文回答。"
         system_prompt = (
@@ -3374,7 +3722,7 @@ Requirements:
         last_error: Exception | None = None
         for attempt in range(3):
             try:
-                return clean_text(
+                generated = clean_text(
                     chat.complete(
                         system_prompt,
                         user_prompt,
@@ -3382,12 +3730,16 @@ Requirements:
                         max_tokens=int(get_env("RAG_ANSWER_MAX_TOKENS", "700")),
                     )
                 )
+                return self_correct_answer(question, generated, top_rows)["answer"]
             except (ArkError, ModelClientError, Exception) as exc:
                 last_error = exc
                 if attempt < 2:
                     time.sleep(1.5 * (attempt + 1))
         if last_error:
-            return _fallback_answer_for_question(question, top_rows)
+            fallback = _fallback_answer_for_question(question, top_rows)
+            return self_correct_answer(question, fallback, top_rows)["answer"]
     except Exception:
-        return _fallback_answer_for_question(question, top_rows)
-    return _fallback_answer_for_question(question, top_rows)
+        fallback = _fallback_answer_for_question(question, top_rows)
+        return self_correct_answer(question, fallback, top_rows)["answer"]
+    fallback = _fallback_answer_for_question(question, top_rows)
+    return self_correct_answer(question, fallback, top_rows)["answer"]

@@ -27,30 +27,30 @@
 本地脚本可以检查结构性问题：
 
 ```bash
-python scripts/31_diagnose_submission_quality.py
+python scripts/05_evaluate.py
+python scripts/12_evaluate_evidence_chains.py
+python scripts/14_chunk_quality_report.py
 ```
 
-它适合发现：
+这些脚本适合发现：
 
-- 空答案。
-- 图片后缀格式错误。
-- 无效图片 id。
-- 明显的提示词泄露。
-- 过长或疑似截断的输出。
+- 检索结果中是否覆盖正确证据。
+- 重排后的证据是否更靠前。
+- 证据链是否包含文本、表格、图片或图注等关键模态。
+- chunk 是否过长、过短或结构信息不足。
 
-但它不能替代真实质量评估，因为它无法判断答案是否真的好、图片是否真的帮助理解。
+但它们不能替代真实质量评估，因为离线指标无法完全判断答案是否真的好、图片是否真的帮助理解。
 
 ## Benchmark Data
 
 本地 benchmark 数据可放在：
 
 ```text
-DataFountain/
 data/sample/
 data/pdfs/
 ```
 
-这些数据用于调试和验证系统能力。正式项目说明中应把它们视为参考数据，而不是项目目标本身。
+这些数据用于调试和验证系统能力。正式项目说明中应把外部数据集视为参考数据，而不是项目目标本身。
 
 ## Known Evaluation Risks
 

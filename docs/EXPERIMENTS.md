@@ -107,3 +107,46 @@ For the final report, the highest-signal table is usually:
 variant, recall_at_5, recall_at_10, mrr, ndcg_at_5,
 evidence_hit, visual_grounding_hit, evidence_chain_ready
 ```
+
+## Current Submitted Snapshot
+
+The repository keeps generated artifacts out of Git, but this document records the current lightweight ablation snapshot. It is meant as a reproducible smoke experiment for the core pipeline, not as the final benchmark score.
+
+```bash
+python scripts/40_run_main_experiment.py \
+  --dataset-name sample \
+  --run-name readme_ablation_20260519 \
+  --variants V0,V1,V2,V3,V4 \
+  --retriever bm25 \
+  --candidate-k 10 \
+  --rerank-k 3 \
+  --build-chains \
+  --answer-provider none \
+  --clean
+```
+
+Retrieval and reranking summary:
+
+| Variant | Label | Recall@1 | Recall@3 | Recall@5 | Recall@10 | MRR | nDCG@5 | Evidence Hit | Modality Hit |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| V0 | Vanilla text-only RAG | 0.600 | 0.800 | 0.800 | 0.800 | 0.700 | 0.726 | 0.800 | 0.400 |
+| V1 | + structured evidence nodes | 0.600 | 1.000 | 1.000 | 1.000 | 0.767 | 0.826 | 1.000 | 1.000 |
+| V2 | + visual evidence fields | 0.600 | 1.000 | 1.000 | 1.000 | 0.767 | 0.826 | 1.000 | 1.000 |
+| V3 | + GraphRAG retrieval signal | 0.600 | 1.000 | 1.000 | 1.000 | 0.767 | 0.826 | 1.000 | 1.000 |
+| V4 | Full MultiRank-RAG evidence chain | 0.800 | 1.000 | 1.000 | 1.000 | 0.900 | 0.926 | 1.000 | 1.000 |
+
+V4 evidence-chain summary:
+
+| Metric | Value |
+|---|---:|
+| chain_present | 1.000 |
+| avg_step_count | 5.000 |
+| gold_node_coverage | 1.000 |
+| gold_page_hit | 1.000 |
+| gold_modality_coverage | 1.000 |
+| visual_grounding_hit | 0.400 |
+| cross_modal_hit | 1.000 |
+| relation_support | 1.000 |
+| evidence_chain_score | 0.916 |
+
+Main observation: V1 shows that structured evidence nodes are the largest immediate gain over text-only chunking. V4 improves ranking quality further, especially Recall@1, MRR, and nDCG@5. The remaining bottleneck is fine-grained visual grounding, which should be evaluated on a larger multimodal benchmark after the smoke test.

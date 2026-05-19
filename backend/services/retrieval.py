@@ -8,14 +8,15 @@ from typing import Any
 from backend.config import ROOT, SCRIPTS_DIR, env_value
 from backend.jobs.store import append_log
 
-from embedding_index import (
+from multirank_rag.common import clean_text, preview
+from multirank_rag.retrieval import (
     DEFAULT_EMBEDDING_BATCH_SIZE,
     DEFAULT_EMBEDDING_DEVICE,
     DEFAULT_EMBEDDING_MODEL,
     EmbeddingIndex,
+    load_kg_index,
+    retrieve_candidates,
 )
-from pipeline_common import clean_text, preview
-from rerank_lib import load_kg_index, retrieve_candidates
 
 
 def candidate_rows_for_question(

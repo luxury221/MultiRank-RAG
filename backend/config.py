@@ -27,7 +27,7 @@ VISUAL_CAPTION_PROVIDERS = {"local", "qwen", "doubao", "xinference", "openai_com
 
 def env_value(name: str, default: str = "") -> str:
     try:
-        from ark_clients import get_env
+        from multirank_rag.models.gateway import get_env
 
         return get_env(name, default)
     except Exception:

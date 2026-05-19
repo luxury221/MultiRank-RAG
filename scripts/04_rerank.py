@@ -25,7 +25,7 @@ from pipeline_common import (
 )
 from rerank_lib import rank_question
 from rerank_lib import load_kg_index
-from datafountain_query_expansion import expand_question, load_routes, submission_id
+from query_expansion import expand_question, load_routes, submission_id
 
 
 RANKING_FIELDS = [
@@ -48,6 +48,10 @@ RANKING_FIELDS = [
     "kg_score",
     "model_rerank_score",
     "adaptive_route",
+    "query_plan",
+    "query_plan_strategy",
+    "required_modalities",
+    "answer_requirements",
     "rerank_profile",
     "source_routes",
     "route_ranks",
@@ -115,7 +119,7 @@ def main() -> None:
         default=os.getenv("RAG_KG_DIR", "outputs/graphrag"),
         help="GraphRAG/KG directory. Empty string disables graph scoring.",
     )
-    parser.add_argument("--routes", default="", help="Optional DataFountain question route CSV for product-aware query expansion.")
+    parser.add_argument("--routes", default="", help="Optional question route CSV for product-aware query expansion.")
     parser.add_argument("--expand-query", action="store_true", help="Append product route aliases to reranking queries.")
     parser.add_argument(
         "--context-expansion",
@@ -147,7 +151,8 @@ def main() -> None:
     edges = read_jsonl(args.edges)
     candidates_by_qid = group_candidates(read_csv(args.candidates))
     embedding_index = None
-    if args.retriever in {"embedding", "hybrid", "fusion", "multiroute", "multi_route", "multi"} and nodes:
+    has_candidate_rows = any(candidates_by_qid.values())
+    if args.retriever in {"embedding", "hybrid", "fusion", "multiroute", "multi_route", "multi"} and nodes and not has_candidate_rows:
         embedding_index = EmbeddingIndex.from_nodes(
             nodes,
             model_name=args.embedding_model,

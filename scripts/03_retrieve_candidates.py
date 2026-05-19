@@ -23,7 +23,7 @@ from pipeline_common import (
     write_csv,
 )
 from rerank_lib import load_kg_index, retrieve_candidates
-from datafountain_query_expansion import expand_question, load_routes, submission_id
+from query_expansion import expand_question, load_routes, submission_id
 
 
 CANDIDATE_FIELDS = [
@@ -37,6 +37,9 @@ CANDIDATE_FIELDS = [
     "score",
     "retriever",
     "embedding_model",
+    "query_plan",
+    "query_plan_strategy",
+    "required_modalities",
     "source_routes",
     "route_ranks",
     "source_ref",
@@ -65,7 +68,7 @@ def main() -> None:
         default=os.getenv("RAG_KG_DIR", "outputs/graphrag"),
         help="GraphRAG/KG directory. Empty string disables graph scoring.",
     )
-    parser.add_argument("--routes", default="", help="Optional DataFountain question route CSV for product-aware query expansion.")
+    parser.add_argument("--routes", default="", help="Optional question route CSV for product-aware query expansion.")
     parser.add_argument("--expand-query", action="store_true", help="Append product route aliases to retrieval queries.")
     parser.add_argument(
         "--context-expansion",
@@ -136,6 +139,7 @@ def main() -> None:
         )
         source_routes = query_question.get("_multiroute_source_routes", {}) if isinstance(query_question, dict) else {}
         route_ranks = query_question.get("_multiroute_route_ranks", {}) if isinstance(query_question, dict) else {}
+        query_plan = query_question.get("_query_plan", {}) if isinstance(query_question, dict) else {}
         for rank, node in enumerate(candidates, start=1):
             node_id = node.get("node_id", "")
             rows.append(
@@ -154,6 +158,15 @@ def main() -> None:
                         if args.retriever in {"embedding", "hybrid", "fusion", "multiroute", "multi_route", "multi"}
                         else ""
                     ),
+                    "query_plan": (
+                        f"route={query_plan.get('route', '')};"
+                        f"strategy={query_plan.get('strategy', '')};"
+                        f"modalities={','.join(query_plan.get('required_modalities') or [])}"
+                    )
+                    if query_plan
+                    else "",
+                    "query_plan_strategy": query_plan.get("strategy", "") if query_plan else "",
+                    "required_modalities": ",".join(query_plan.get("required_modalities") or []) if query_plan else "",
                     "source_routes": source_routes.get(node_id, ""),
                     "route_ranks": route_ranks.get(node_id, ""),
                     "source_ref": node.get("source_ref", ""),
