@@ -19,7 +19,7 @@ Production-facing imports should prefer `multirank_rag/`. The scripts below are 
 | `13_export_frontend_data.py` | Export artifacts consumed by the frontend demo. |
 | `23_build_graphrag.py` | Build GraphRAG entities, relations, and communities. |
 | `34_generate_chain_answers.py` | Generate final answers from evidence chains. |
-| `40_run_main_experiment.py` | Main experiment runner for V0-V4/G0-G4 variants. |
+| `40_run_main_experiment.py` | Main experiment runner for V0-V5/G0-G4 variants, including the ABECD + Guard enhanced pipeline. |
 | `42_enhance_multimodal_nodes.py` | Enhance table and visual nodes. |
 | `52_self_correct_evidence.py` | Verify, merge, or replace evidence chains. |
 

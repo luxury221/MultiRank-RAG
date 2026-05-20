@@ -73,6 +73,10 @@ class ExperimentVariant:
     default_retriever: str
     enable_model_rerank: bool
     build_chain: bool
+    context_expansion: bool = False
+    adaptive_rerank_boost: bool = False
+    graph_context_boost: bool = False
+    evidence_guard: bool = False
 
 
 VARIANTS: dict[str, ExperimentVariant] = {
@@ -135,6 +139,22 @@ VARIANTS: dict[str, ExperimentVariant] = {
         default_retriever="fusion",
         enable_model_rerank=True,
         build_chain=True,
+    ),
+    "V5": ExperimentVariant(
+        name="V5",
+        label="Enhanced MultiRank-RAG (ABECD + Guard)",
+        force_text_only=False,
+        strip_visual=False,
+        build_graph=True,
+        build_graphrag=True,
+        method="G4",
+        default_retriever="multiroute",
+        enable_model_rerank=True,
+        build_chain=True,
+        context_expansion=True,
+        adaptive_rerank_boost=True,
+        graph_context_boost=True,
+        evidence_guard=True,
     ),
 }
 
@@ -270,7 +290,7 @@ def run_variant(args: argparse.Namespace, variant: ExperimentVariant, base_nodes
         nodes_path,
         edges_path,
         args.dry_run,
-        enhanced_context_edges=bool(args.graph_context_boost and variant.build_graph),
+        enhanced_context_edges=bool((args.graph_context_boost or variant.graph_context_boost) and variant.build_graph),
     )
     kg_arg = build_graphrag(py, variant, nodes_path, edges_path, kg_dir, args.dry_run)
     if not kg_arg:
@@ -306,7 +326,7 @@ def run_variant(args: argparse.Namespace, variant: ExperimentVariant, base_nodes
             "--kg-dir",
             kg_arg,
         ]
-    if args.context_expansion:
+    if args.context_expansion or variant.context_expansion:
         retrieve_cmd.append("--context-expansion")
     run_step(retrieve_cmd, env=env, dry_run=args.dry_run)
 
@@ -342,11 +362,11 @@ def run_variant(args: argparse.Namespace, variant: ExperimentVariant, base_nodes
             "--methods",
             variant.method,
         ]
-    if args.context_expansion:
+    if args.context_expansion or variant.context_expansion:
         rerank_cmd.append("--context-expansion")
-    if args.adaptive_rerank_boost:
+    if args.adaptive_rerank_boost or variant.adaptive_rerank_boost:
         rerank_cmd.append("--adaptive-rerank-boost")
-    if args.graph_context_boost:
+    if args.graph_context_boost or variant.graph_context_boost:
         rerank_cmd.append("--graph-context-boost")
     run_step(rerank_cmd, env=env, dry_run=args.dry_run)
     run_step(
@@ -388,7 +408,7 @@ def run_variant(args: argparse.Namespace, variant: ExperimentVariant, base_nodes
                 "--output-md",
                 str(chain_dir / "evidence_chains.md"),
             ]
-        if args.evidence_guard:
+        if args.evidence_guard or variant.evidence_guard:
             chain_cmd.append("--evidence-guard")
         run_step(chain_cmd, env=env, dry_run=args.dry_run)
         run_step(
@@ -482,13 +502,13 @@ def resolve_dataset_paths(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the main V0-V4 MultiRank-RAG ablation experiment.")
+    parser = argparse.ArgumentParser(description="Run the main V0-V5 MultiRank-RAG ablation experiment.")
     parser.add_argument("--dataset-name", default="sample", help="sample, current, or a custom name.")
     parser.add_argument("--nodes", default="", help="Evidence nodes JSONL. Optional for sample/current.")
     parser.add_argument("--questions", default="", help="Question CSV. Optional for sample/current.")
     parser.add_argument("--output-dir", default="outputs/experiments")
     parser.add_argument("--run-name", default="latest")
-    parser.add_argument("--variants", type=parse_variant_list, default=parse_variant_list("V0,V1,V2,V3,V4"))
+    parser.add_argument("--variants", type=parse_variant_list, default=parse_variant_list("V0,V1,V2,V3,V4,V5"))
     parser.add_argument("--candidate-k", type=int, default=50)
     parser.add_argument("--rerank-k", type=int, default=10)
     parser.add_argument(

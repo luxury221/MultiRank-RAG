@@ -56,18 +56,18 @@ The recommended user-facing path is the main pipeline plus backend/frontend.
 
 ## Main Experiment
 
-Run the V0-V4 experiment and let V4 generate chain-grounded answers:
+Run the V0-V5 experiment and let the strongest chain variant generate grounded answers:
 
 ```bash
 python scripts/40_run_main_experiment.py \
   --dataset-name sample \
-  --variants V0,V1,V2,V3,V4 \
+  --variants V0,V1,V2,V3,V4,V5 \
   --build-chains \
   --generate-answers \
   --answer-provider ark
 ```
 
-Use `--answer-provider none` for deterministic offline output without calling an API. The generated answer files are written under `V4/evidence_chains/answers.csv` and `answers.jsonl`.
+Use `--answer-provider none` for deterministic offline output without calling an API. The generated answer files are written under each selected variant's `evidence_chains/answers.csv` and `answers.jsonl`.
 
 ## GraphRAG
 

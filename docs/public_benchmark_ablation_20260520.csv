@@ -1,0 +1,25 @@
+dataset,dataset_display,task_type,variant,label,method,num_questions,recall_at_1,recall_at_5,recall_at_10,mrr,ndcg_at_5,evidence_hit,modality_hit,visual_grounding_hit,evidence_chain_ready,evidence_chain_score,gold_node_coverage,avg_chain_step_count
+ragbench_emanual_100,RAGBench eManual,text/manual QA,V0,Vanilla text-only RAG,G1,66,0.833333,1.0,1.0,0.89899,1.182834,1.0,1.0,0.0,0.924242,,,
+ragbench_emanual_100,RAGBench eManual,text/manual QA,V1,+ structured evidence nodes,G1,66,0.833333,1.0,1.0,0.89899,1.182834,1.0,1.0,0.0,0.924242,,,
+ragbench_emanual_100,RAGBench eManual,text/manual QA,V2,+ visual evidence fields,G1,66,0.833333,1.0,1.0,0.89899,1.182834,1.0,1.0,0.0,0.924242,,,
+ragbench_emanual_100,RAGBench eManual,text/manual QA,V3,+ GraphRAG retrieval signal,G1,66,0.833333,1.0,1.0,0.89899,1.182834,1.0,1.0,0.0,0.924242,,,
+ragbench_emanual_100,RAGBench eManual,text/manual QA,V4,Full MultiRank-RAG evidence chain,G4,66,0.833333,1.0,1.0,0.89899,1.182834,1.0,1.0,0.0,0.924242,0.9808,1.0,3.0
+ragbench_emanual_100,RAGBench eManual,text/manual QA,V5,Enhanced MultiRank-RAG (ABECD + Guard),G4,66,0.833333,1.0,1.0,0.893939,1.156225,1.0,1.0,0.0,0.924242,0.9808,1.0,4.34
+t2_finqa_100,T2/FinQA,table and numeric reasoning,V0,Vanilla text-only RAG,G1,100,0.83,0.99,1.0,0.907917,0.678244,0.99,1.0,0.0,0.0,,,
+t2_finqa_100,T2/FinQA,table and numeric reasoning,V1,+ structured evidence nodes,G1,100,0.83,0.99,1.0,0.907917,0.678244,0.99,1.0,0.0,0.0,,,
+t2_finqa_100,T2/FinQA,table and numeric reasoning,V2,+ visual evidence fields,G1,100,0.84,0.99,1.0,0.913095,0.683304,0.99,1.0,0.0,0.0,,,
+t2_finqa_100,T2/FinQA,table and numeric reasoning,V3,+ GraphRAG retrieval signal,G1,100,0.84,0.99,1.0,0.913095,0.683304,0.99,1.0,0.0,0.0,,,
+t2_finqa_100,T2/FinQA,table and numeric reasoning,V4,Full MultiRank-RAG evidence chain,G4,100,0.84,0.99,1.0,0.913333,0.695491,0.99,1.0,0.0,0.0,0.981,0.95,5.0
+t2_finqa_100,T2/FinQA,table and numeric reasoning,V5,Enhanced MultiRank-RAG (ABECD + Guard),G4,100,0.84,0.99,1.0,0.895095,0.877685,0.99,1.0,0.0,0.0,0.9789,0.965,4.92
+mmlongbench_doc_100,MMLongBench-Doc,multimodal long-document grounding,V0,Vanilla text-only RAG,G1,100,0.07,0.07,0.07,0.07,0.07,0.07,0.0,0.0,0.0,,,
+mmlongbench_doc_100,MMLongBench-Doc,multimodal long-document grounding,V1,+ structured evidence nodes,G1,100,0.07,0.07,0.07,0.07,0.07,0.07,1.0,0.0,0.0,,,
+mmlongbench_doc_100,MMLongBench-Doc,multimodal long-document grounding,V2,+ visual evidence fields,G1,100,0.07,0.07,0.07,0.07,0.07,0.07,1.0,1.0,0.07,,,
+mmlongbench_doc_100,MMLongBench-Doc,multimodal long-document grounding,V3,+ GraphRAG retrieval signal,G1,100,0.07,0.07,0.07,0.07,0.07,0.07,1.0,1.0,0.07,,,
+mmlongbench_doc_100,MMLongBench-Doc,multimodal long-document grounding,V4,Full MultiRank-RAG evidence chain,G4,100,0.07,0.07,0.09,0.072778,0.07,0.07,1.0,1.0,0.07,0.529973,0.015217,4.76
+mmlongbench_doc_100,MMLongBench-Doc,multimodal long-document grounding,V5,Enhanced MultiRank-RAG (ABECD + Guard),G4,100,0.07,0.07,0.09,0.072778,0.07,0.07,1.0,1.0,0.07,0.526859,0.008696,2.83
+multihop_rag_100,MultiHop-RAG,multi-hop and cross-document retrieval,V0,Vanilla text-only RAG,G1,100,0.67,0.89,0.9,0.754917,0.615237,0.89,1.0,0.0,0.85,,,
+multihop_rag_100,MultiHop-RAG,multi-hop and cross-document retrieval,V1,+ structured evidence nodes,G1,100,0.67,0.89,0.9,0.754917,0.615237,0.89,1.0,0.0,0.85,,,
+multihop_rag_100,MultiHop-RAG,multi-hop and cross-document retrieval,V2,+ visual evidence fields,G1,100,0.67,0.89,0.9,0.754917,0.615237,0.89,1.0,0.0,0.85,,,
+multihop_rag_100,MultiHop-RAG,multi-hop and cross-document retrieval,V3,+ GraphRAG retrieval signal,G1,100,0.67,0.89,0.9,0.754917,0.615237,0.89,1.0,0.0,0.85,,,
+multihop_rag_100,MultiHop-RAG,multi-hop and cross-document retrieval,V4,Full MultiRank-RAG evidence chain,G4,100,0.66,0.89,0.91,0.751595,0.615846,0.89,1.0,0.0,0.85,0.863833,0.661667,4.96
+multihop_rag_100,MultiHop-RAG,multi-hop and cross-document retrieval,V5,Enhanced MultiRank-RAG (ABECD + Guard),G4,100,0.66,0.89,0.91,0.751595,0.615335,0.89,1.0,0.0,0.85,0.8898,0.73,4.96
