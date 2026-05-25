@@ -1,0 +1,7 @@
+dataset,run_name,variant,retriever,embedding_model,method,num_questions,hit_at_1,hit_at_5,hit_at_10,mrr,ndcg_at_5,gold_node_recall_at_5,gold_node_recall_at_10,strict_visual_grounding_at_5,evidence_chain_score,gold_node_coverage,avg_chain_step_count,notes
+mmlongbench_doc_100,public_bm25_v0v5_full_20260520,V2,bm25,,G1,100,0.07,0.07,0.07,0.07,0.07,0.015217,0.030435,0.07,,,,Original text/BM25 page-placeholder run.
+mmlongbench_doc_100,public_bm25_v0v5_full_20260520,V4,bm25,,G4,100,0.07,0.07,0.09,0.072778,0.07,0.015217,0.033478,0.07,0.529973,0.015217,4.76,Original text/BM25 page-placeholder run.
+mmlongbench_doc_100,public_bm25_v0v5_full_20260520,V5,bm25,,G4,100,0.07,0.07,0.09,0.072778,0.07,0.015217,0.033478,0.07,0.526859,0.008696,2.83,Original text/BM25 page-placeholder run.
+mmlongbench_doc_100,public_doubao_visual_v2v5_20260525,V2,embedding,doubao-embedding-vision-250615,G1,100,0.8,0.91,0.93,0.847429,0.736259,0.116837,0.207334,0.91,,,,Doubao visual page embedding rerun.
+mmlongbench_doc_100,public_doubao_visual_v2v5_20260525,V4,embedding,doubao-embedding-vision-250615,G4,100,0.8,0.91,0.92,0.846429,0.742397,0.118908,0.209204,0.91,0.568218,0.115864,4.76,Doubao visual page embedding rerun.
+mmlongbench_doc_100,public_doubao_visual_v2v5_20260525,V5,embedding,doubao-embedding-vision-250615,G4,100,0.8,0.91,0.92,0.846429,0.742397,0.118908,0.209204,0.91,0.552125,0.073513,2.88,Doubao visual page embedding rerun.

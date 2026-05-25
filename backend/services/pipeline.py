@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
-from backend.config import env_int, env_value
+from backend.config import env_bool, env_int, env_value
 from backend.jobs.store import append_log, job_dir, write_status
 from backend.services.frontend import normalize_ranking_for_frontend, normalize_step_for_frontend, rel_file_url
 from backend.services.questions import infer_question_type, write_single_question
@@ -28,10 +29,64 @@ from multirank_rag.rerank import answer_for_question, rank_question
 from multirank_rag.retrieval import DEFAULT_EMBEDDING_BATCH_SIZE, DEFAULT_EMBEDDING_DEVICE, DEFAULT_EMBEDDING_MODEL, build_graph
 
 
+def _effect_priority_enabled(mode: str) -> bool:
+    return mode.strip().lower() not in {"0", "false", "no", "off", "fast", "speed", "standard", "baseline", "lite"}
+
+
+def backend_pipeline_options() -> dict[str, Any]:
+    mode = env_value("RAG_BACKEND_PIPELINE_MODE", "quality").strip().lower() or "quality"
+    effect_priority = _effect_priority_enabled(mode)
+    variant = env_value(
+        "RAG_BACKEND_PIPELINE_VARIANT",
+        "V5-online-quality" if effect_priority else "V4-online-standard",
+    )
+    default_retriever = "multiroute" if effect_priority else "fusion"
+    candidate_retriever = env_value("RAG_BACKEND_CANDIDATE_RETRIEVER", default_retriever).strip().lower()
+    rerank_retriever = env_value("RAG_BACKEND_RERANK_RETRIEVER", candidate_retriever).strip().lower()
+    return {
+        "pipeline_mode": mode,
+        "pipeline_variant": variant,
+        "effect_priority": effect_priority,
+        "candidate_retriever": candidate_retriever,
+        "rerank_retriever": rerank_retriever,
+        "candidate_k": env_int("RAG_BACKEND_CANDIDATE_K", 50),
+        "rerank_k": env_int("RAG_BACKEND_RERANK_K", 10),
+        "context_expansion": env_bool("RAG_BACKEND_CONTEXT_EXPANSION", effect_priority),
+        "adaptive_rerank_boost": env_bool("RAG_BACKEND_ADAPTIVE_RERANK_BOOST", effect_priority),
+        "graph_context_boost": env_bool("RAG_BACKEND_GRAPH_CONTEXT_BOOST", effect_priority),
+        "evidence_guard": env_bool("RAG_BACKEND_EVIDENCE_GUARD", effect_priority),
+        "enhanced_context_edges": env_bool("RAG_BACKEND_ENHANCED_CONTEXT_EDGES", effect_priority),
+    }
+
+
 def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_template: str = "auto") -> None:
     job = job_dir(job_id)
     try:
-        write_status(job_id, status="running", stage="parse", progress=8)
+        options = backend_pipeline_options()
+        write_status(
+            job_id,
+            status="running",
+            stage="parse",
+            progress=8,
+            pipeline_mode=options["pipeline_mode"],
+            pipeline_variant=options["pipeline_variant"],
+            effect_priority=int(options["effect_priority"]),
+            candidate_retriever=options["candidate_retriever"],
+            rerank_retriever=options["rerank_retriever"],
+            context_expansion=int(options["context_expansion"]),
+            adaptive_rerank_boost=int(options["adaptive_rerank_boost"]),
+            graph_context_boost=int(options["graph_context_boost"]),
+            evidence_guard=int(options["evidence_guard"]),
+            enhanced_context_edges=int(options["enhanced_context_edges"]),
+        )
+        append_log(
+            job_id,
+            "Online pipeline: "
+            f"{options['pipeline_variant']} "
+            f"(candidate={options['candidate_retriever']}, rerank={options['rerank_retriever']}, "
+            f"context={int(options['context_expansion'])}, graph_boost={int(options['graph_context_boost'])}, "
+            f"guard={int(options['evidence_guard'])}).",
+        )
         append_log(job_id, f"正在解析 PDF 并生成模板化 chunk，模板：{chunk_template}")
 
         doc_id = normalize_doc_id(pdf_path.name)
@@ -104,7 +159,7 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
 
         write_status(job_id, stage="graph", progress=38)
         append_log(job_id, "正在构建页面、正文、表格、图片之间的图关系")
-        edges = build_graph_edges.build_edges(nodes)
+        edges = build_graph_edges.build_edges(nodes, enhanced_context_edges=bool(options["enhanced_context_edges"]))
         write_jsonl(job / "edges.jsonl", edges)
 
         write_status(job_id, stage="kg", progress=46)
@@ -119,19 +174,32 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
 
         write_status(job_id, stage="retrieve", progress=56)
         append_log(job_id, "正在召回候选证据")
-        embedding_index = build_embedding_index_for_backend(nodes, job)
-        candidate_rows = candidate_rows_for_question(question, nodes, job, embedding_index, kg_index)
+        embedding_index = build_embedding_index_for_backend(
+            nodes,
+            job,
+            [str(options["candidate_retriever"]), str(options["rerank_retriever"])],
+        )
+        candidate_rows = candidate_rows_for_question(
+            question,
+            nodes,
+            job,
+            embedding_index,
+            kg_index,
+            candidate_k=int(options["candidate_k"]),
+            retriever=str(options["candidate_retriever"]),
+            context_expansion=bool(options["context_expansion"]),
+        )
         write_csv_dicts(job / "candidates.csv", candidate_rows)
 
         write_status(job_id, stage="rerank", progress=70)
-        append_log(job_id, "正在进行 G4 证据重排序")
+        append_log(job_id, f"Running {options['pipeline_variant']} evidence rerank.")
         ranking_rows = rank_question(
             question,
             nodes,
             edges,
-            top_k=int(env_value("RAG_BACKEND_RERANK_K", "10")),
+            top_k=int(options["rerank_k"]),
             candidate_rows=candidate_rows,
-            retriever=env_value("RAG_BACKEND_RERANK_RETRIEVER", "fusion"),
+            retriever=str(options["rerank_retriever"]),
             embedding_index=embedding_index,
             embedding_model=env_value("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
             embedding_cache=env_value("RAG_BACKEND_EMBEDDING_CACHE", str(job / "embeddings")),
@@ -139,6 +207,9 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
             embedding_batch_size=int(env_value("RAG_EMBEDDING_BATCH_SIZE", str(DEFAULT_EMBEDDING_BATCH_SIZE))),
             hybrid_alpha=float(env_value("RAG_BACKEND_HYBRID_ALPHA", "0.7")),
             kg_index=kg_index,
+            context_expansion=bool(options["context_expansion"]),
+            adaptive_rerank_boost=bool(options["adaptive_rerank_boost"]),
+            graph_context_boost=bool(options["graph_context_boost"]),
         )
         write_csv_dicts(job / "reranked.csv", ranking_rows)
 
@@ -153,6 +224,7 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
             nodes_by_id,
             graph,
             max_steps=int(env_value("RAG_BACKEND_MAX_STEPS", "5")),
+            evidence_guard=bool(options["evidence_guard"]),
         )
         write_csv_dicts(job / "chain_steps.csv", steps)
         question["answer"] = answer_for_question(question, steps or g4_rows)
@@ -176,6 +248,21 @@ def run_upload_job(job_id: str, question_text: str, pdf_path: Path, chunk_templa
                 "gold_pages": [],
                 "gold_modalities": [],
                 "evidence_note": question["evidence_note"],
+                "pipeline_mode": options["pipeline_mode"],
+                "pipeline_variant": options["pipeline_variant"],
+                "effect_priority": int(options["effect_priority"]),
+                "candidate_retriever": options["candidate_retriever"],
+                "rerank_retriever": options["rerank_retriever"],
+                "candidate_k": int(options["candidate_k"]),
+                "rerank_k": int(options["rerank_k"]),
+                "context_expansion": int(options["context_expansion"]),
+                "adaptive_rerank_boost": int(options["adaptive_rerank_boost"]),
+                "graph_context_boost": int(options["graph_context_boost"]),
+                "evidence_guard": int(options["evidence_guard"]),
+                "enhanced_context_edges": int(options["enhanced_context_edges"]),
+                "embedding_provider": env_value("RAG_EMBEDDING_PROVIDER", env_value("RAG_MODEL_PROVIDER", "auto")),
+                "embedding_model": env_value("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
+                "graph_edge_count": len(edges),
                 "card_url": card_url,
                 "num_steps": len(normalized_steps),
                 "quality_status": "pass" if card_url and normalized_steps else "warn",

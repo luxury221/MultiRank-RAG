@@ -1,5 +1,14 @@
 # MultiRank-RAG
 
+## 仓库分区
+
+本仓库现在按两个清晰工作面组织：
+
+- `projects/complex_document_qa/`：复杂文档问答系统主项目，包含前后端展示入口、核心代码索引、项目报告和作品材料。
+- `competitions/tianchi_legal/`：阿里天池法律问答比赛分区，包含比赛专用链路、离线脚本、Kaggle notebook、文档和历史提交快照。
+
+核心代码仍保留在 `backend/`、`web/`、`multirank_rag/` 和 `scripts/` 原路径，保证已有命令、前后端启动和实验链路不会因为整理目录而失效。
+
 面向复杂 PDF 文档的多模态 RAG、GraphRAG 与证据链问答系统。
 
 MultiRank-RAG 的目标不是只返回一个答案，而是从复杂文档中检索、组织并展示一条可追溯的证据链。系统会把 PDF 中的文本、标题、表格、图片、图注、公式、页面布局等信息统一建模为 evidence nodes，再通过混合召回、多路融合、GraphRAG、查询自适应重排序和自我修正机制，生成带证据引用的最终回答与可视化证据卡片。
@@ -276,7 +285,7 @@ python scripts/40_run_main_experiment.py \
 |---|---|---|
 | RAGBench eManual | 文本/手册问答 | V0 已达到 Recall@5/10=1.000，说明简单文本手册任务已接近饱和，可作为负控制。 |
 | T2/FinQA | 表格与数值推理 | V5 将 nDCG@5 从 0.678 提升到 0.878，说明表格/上下文感知重排改善了证据排序质量。 |
-| MMLongBench-Doc | 多模态长文档 grounding | V1-V5 将 Modality Hit 从 0 提升到 1，V2+ 将 Visual Grounding Hit 从 0 提升到 1；但 BM25 下 Recall 仍低，下一步应接 embedding-vision / ColPali 类页面级检索。 |
+| MMLongBench-Doc | 多模态长文档 grounding | BM25 只能匹配页面占位文本，Hit@5 约 0.07；接入 Doubao embedding-vision 后，页面级视觉召回 Hit@5 提升到 0.91，说明该数据集真正考察的是图像页面与问题语义的对齐。 |
 | MultiHop-RAG | 多跳与跨文档检索 | V4/V5 将 Recall@10 从 0.900 提升到 0.910；V5 将证据链分数从 0.864 提升到 0.890，gold node coverage 从 0.662 提升到 0.730。 |
 
 V0-V5 的含义：
@@ -289,6 +298,38 @@ V0-V5 的含义：
 | V3 | + GraphRAG retrieval signal |
 | V4 | full MultiRank-RAG evidence chain |
 | V5 | ABECD + Evidence Guard enhanced pipeline |
+
+### MMLongBench-Doc 视觉复测
+
+MMLongBench-Doc 的节点是页面图片，旧版 BM25 实验只能检索 `MMLongBench-Doc page image` 这类占位文本，因此 Recall/Hit 偏低。复测时改用 `doubao-embedding-vision-250615` 对问题文本和页面图像分别编码，再用 embedding 召回进入 V2/V4/V5 重排链路。
+
+复测命令：
+
+```bash
+python scripts/40_run_main_experiment.py \
+  --dataset-name mmlongbench_doc_100 \
+  --nodes outputs/benchmarks/mmlongbench_doc_100/nodes.jsonl \
+  --questions outputs/benchmarks/mmlongbench_doc_100/questions.csv \
+  --run-name public_doubao_visual_v2v5_20260525 \
+  --variants V2,V4,V5 \
+  --retriever embedding \
+  --candidate-k 50 \
+  --rerank-k 10 \
+  --build-chains \
+  --answer-provider none \
+  --clean
+```
+
+关键结果：
+
+| Setting | Hit@5 | Hit@10 | MRR | nDCG@5 | Strict Visual@5 |
+|---|---:|---:|---:|---:|---:|
+| BM25 V2 | 0.070 | 0.070 | 0.070 | 0.070 | 0.070 |
+| Doubao Vision V2 | 0.910 | 0.930 | 0.847 | 0.736 | 0.910 |
+| Doubao Vision V4 | 0.910 | 0.920 | 0.846 | 0.742 | 0.910 |
+| Doubao Vision V5 | 0.910 | 0.920 | 0.846 | 0.742 | 0.910 |
+
+完整结果见 [docs/mmlongbench_doc_visual_retest_20260525.csv](docs/mmlongbench_doc_visual_retest_20260525.csv)。汇报时建议把这组结果作为“视觉语义召回打开后，系统从文本 RAG 升级到页面级多模态 grounding”的关键证据；同时说明这组实验关闭了答案生成，指标衡量的是证据检索与视觉定位质量。
 
 内置 `data/sample` 仍保留为轻量烟测数据，用于快速验证 pipeline 是否能从解析、召回、重排跑到证据链生成；公开数据集结果才是当前 README 的主实验依据。
 
@@ -386,8 +427,15 @@ RAG_ANSWER_PROVIDER=ark
 RAG_ANSWER_MODEL=<your-answer-model-endpoint>
 
 RAG_KG_DIR=outputs/graphrag
-RAG_BACKEND_CANDIDATE_RETRIEVER=fusion
-RAG_BACKEND_RERANK_RETRIEVER=fusion
+RAG_BACKEND_PIPELINE_MODE=quality
+RAG_BACKEND_PIPELINE_VARIANT=V5-online-quality
+RAG_BACKEND_CANDIDATE_RETRIEVER=multiroute
+RAG_BACKEND_RERANK_RETRIEVER=multiroute
+RAG_BACKEND_CONTEXT_EXPANSION=true
+RAG_BACKEND_ADAPTIVE_RERANK_BOOST=true
+RAG_BACKEND_GRAPH_CONTEXT_BOOST=true
+RAG_BACKEND_EVIDENCE_GUARD=true
+RAG_BACKEND_ENHANCED_CONTEXT_EDGES=true
 ```
 
 如需统一走 Xinference：
@@ -544,7 +592,7 @@ outputs/reports/openragbench_experiment_overview_*.csv
 
 - `.env`、API key、上传 PDF、输出结果、外部仓库和大模型权重不会提交到 Git。
 - `outputs/` 只保留 `.gitkeep` 和说明文件，所有实验结果都作为本地运行产物管理。
-- `DataFountain/`、`external/`、用户上传文件和私有文档默认被忽略。
+- `external/`、用户上传文件和私有文档默认被忽略。
 - README 中的模型名称和 API key 字段均为占位说明，真实配置请写入本地 `.env`。
 
 ## 项目亮点总结

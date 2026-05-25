@@ -25,9 +25,12 @@ def candidate_rows_for_question(
     job: Path | None = None,
     embedding_index: EmbeddingIndex | None = None,
     kg_index: dict[str, Any] | None = None,
+    candidate_k: int | None = None,
+    retriever: str | None = None,
+    context_expansion: bool = False,
 ) -> list[dict[str, Any]]:
-    candidate_k = int(env_value("RAG_BACKEND_CANDIDATE_K", "50"))
-    retriever = env_value("RAG_BACKEND_CANDIDATE_RETRIEVER", "fusion")
+    candidate_k = candidate_k or int(env_value("RAG_BACKEND_CANDIDATE_K", "50"))
+    retriever = (retriever or env_value("RAG_BACKEND_CANDIDATE_RETRIEVER", "fusion")).strip().lower()
     candidates, scores = retrieve_candidates(
         question,
         nodes,
@@ -40,7 +43,11 @@ def candidate_rows_for_question(
         embedding_batch_size=int(env_value("RAG_EMBEDDING_BATCH_SIZE", str(DEFAULT_EMBEDDING_BATCH_SIZE))),
         hybrid_alpha=float(env_value("RAG_BACKEND_HYBRID_ALPHA", "0.7")),
         kg_index=kg_index,
+        context_expansion=context_expansion,
     )
+    source_routes = question.get("_multiroute_source_routes", {}) if isinstance(question, dict) else {}
+    route_ranks = question.get("_multiroute_route_ranks", {}) if isinstance(question, dict) else {}
+    query_plan = question.get("_query_plan", {}) if isinstance(question, dict) else {}
     rows: list[dict[str, Any]] = []
     for rank, node in enumerate(candidates, start=1):
         node_id = clean_text(node.get("node_id"))
@@ -56,8 +63,19 @@ def candidate_rows_for_question(
                 "score": round(scores.get(node_id, 0.0), 6),
                 "retriever": retriever,
                 "embedding_model": env_value("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
-                if retriever in {"embedding", "hybrid", "fusion"}
+                if retriever in {"embedding", "hybrid", "fusion", "multiroute", "multi_route", "multi"}
                 else "",
+                "query_plan": (
+                    f"route={query_plan.get('route', '')};"
+                    f"strategy={query_plan.get('strategy', '')};"
+                    f"modalities={','.join(query_plan.get('required_modalities') or [])}"
+                )
+                if query_plan
+                else "",
+                "query_plan_strategy": query_plan.get("strategy", "") if query_plan else "",
+                "required_modalities": ",".join(query_plan.get("required_modalities") or []) if query_plan else "",
+                "source_routes": source_routes.get(node_id, ""),
+                "route_ranks": route_ranks.get(node_id, ""),
                 "source_ref": node.get("source_ref", ""),
                 "content_preview": preview(node.get("content", "")),
             }
@@ -65,14 +83,26 @@ def candidate_rows_for_question(
     return rows
 
 
-def build_embedding_index_for_backend(nodes: list[dict[str, Any]], job: Path) -> EmbeddingIndex | None:
-    retriever = env_value("RAG_BACKEND_RERANK_RETRIEVER", "fusion")
-    candidate_retriever = env_value("RAG_BACKEND_CANDIDATE_RETRIEVER", "fusion")
-    if retriever not in {"embedding", "hybrid", "fusion"} and candidate_retriever not in {
+def build_embedding_index_for_backend(
+    nodes: list[dict[str, Any]],
+    job: Path,
+    retrievers: list[str] | None = None,
+) -> EmbeddingIndex | None:
+    if retrievers is None:
+        retrievers = [
+            env_value("RAG_BACKEND_RERANK_RETRIEVER", "fusion"),
+            env_value("RAG_BACKEND_CANDIDATE_RETRIEVER", "fusion"),
+        ]
+    normalized = {clean_text(value).lower() for value in retrievers}
+    embedding_retrievers = {
         "embedding",
         "hybrid",
         "fusion",
-    }:
+        "multiroute",
+        "multi_route",
+        "multi",
+    }
+    if not normalized & embedding_retrievers:
         return None
     model = env_value("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
     provider = env_value("RAG_EMBEDDING_PROVIDER", env_value("RAG_MODEL_PROVIDER", "auto"))

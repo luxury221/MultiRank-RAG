@@ -50,14 +50,21 @@ outputs/*
 data/pdfs/*.pdf
 data/pdfs/**/*.pdf
 data/uploads/
-DataFountain/
+data/tianchi_legal/raw/*
+data/tianchi_legal/extracted/*
+data/tianchi_legal/processed/*
+!data/tianchi_legal/raw/.gitkeep
+!data/tianchi_legal/extracted/.gitkeep
+!data/tianchi_legal/processed/.gitkeep
 *.docx
+!projects/complex_document_qa/reports/开题报告.docx
 *.pptx
 *.xlsx
 ~$*
 
 # Local cloned dependencies / external repositories
 external/
+*.egg-info/
 
 # Local one-off experiment scripts
 scripts/33_build_last_submission.py

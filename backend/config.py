@@ -48,6 +48,15 @@ def env_float(name: str, default: float) -> float:
         return default
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    value = env_value(name, "1" if default else "0").strip().lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 def normalize_chunk_template(value: str) -> str:
     value = " ".join(str(value or "").split()).lower() or "auto"
     return value if value in {"auto", "general", "ai", "math", "finance", "medical"} else "auto"

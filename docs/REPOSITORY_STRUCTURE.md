@@ -12,6 +12,8 @@ scripts/      CLI-oriented pipeline, evaluation, and research utilities
 configs/      Environment and model configuration examples
 data/         Small sample inputs and local question files
 docs/         Architecture, evaluation, and engineering documentation
+projects/     Product-facing project bundles and reports
+competitions/ Competition-specific implementations and result snapshots
 outputs/      Generated runtime artifacts, ignored by Git
 external/     External cloned dependencies, ignored by Git
 ```
@@ -59,6 +61,15 @@ The important distinction is:
 - **Core pipeline scripts** are part of the maintained project workflow.
 - **Evaluation scripts** measure retrieval, reranking, and evidence-chain quality.
 - **Dataset preparation scripts** build local benchmarks and sample data.
-- **Competition/legacy scripts** are retained for traceability but are not the main project interface.
+- **Competition scripts** are indexed under `competitions/` and retained for traceability, but they are not the main product interface.
 
 Future refactors can gradually move more implementation details from `scripts/*.py` into `multirank_rag/` while keeping the CLI wrappers stable.
+
+## Project Tracks
+
+```text
+projects/complex_document_qa/      Main complex-document QA system, reports, and product manifest
+competitions/tianchi_legal/        Alibaba Tianchi legal RAG track, offline scripts, docs, and snapshots
+```
+
+The track folders are intentionally lightweight. They point to stable code paths instead of moving runtime-critical modules, so existing backend, frontend, and experiment commands continue to work.

@@ -263,10 +263,13 @@ def main() -> None:
             }
         )
 
+    pdfs = build_pdf_index(nodes, questions)
+    parsed_pdf_count = len([pdf for pdf in pdfs if pdf.get("pages") or pdf.get("node_count")])
+
     app_data = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "corpus": {
-            "num_pdfs": len({row["doc_id"] for row in exported_questions if row.get("doc_id")}),
+            "num_pdfs": parsed_pdf_count,
             "num_questions": len(exported_questions),
             "num_chain_steps": sum(len(steps) for steps in chains.values()),
             "num_cards": len([q for q in exported_questions if q.get("card_url")]),
@@ -274,7 +277,7 @@ def main() -> None:
             "quality_warn": len([q for q in exported_questions if q.get("quality_status") == "warn"]),
             "quality_fail": len([q for q in exported_questions if q.get("quality_status") == "fail"]),
         },
-        "pdfs": build_pdf_index(nodes, questions),
+        "pdfs": pdfs,
         "questions": exported_questions,
         "chains": chains,
         "rankings": normalized_rankings,

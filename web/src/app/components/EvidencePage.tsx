@@ -56,6 +56,10 @@ function qualityClass(status: string) {
   return 'border-slate-200 bg-slate-100 text-slate-600';
 }
 
+function enabledFlag(value?: number | boolean) {
+  return value === true || value === 1;
+}
+
 function nodeIcon(step: EvidenceStep) {
   if (step.node_type === 'table') {
     return <Table2 size={15} />;
@@ -138,6 +142,19 @@ export function EvidencePage({ data, question, request, onBack }: EvidencePagePr
   const statusLabel = uploadRequest ? jobStatus?.status ?? (jobError ? 'failed' : 'queued') : displayQuestion.quality_status;
   const isUploadRunning =
     Boolean(uploadRequest) && !jobError && jobStatus?.status !== 'succeeded' && jobStatus?.status !== 'failed';
+  const pipelineVariant =
+    displayQuestion.pipeline_variant || jobStatus?.pipeline_variant || (uploadRequest ? 'V5-online-quality' : 'offline');
+  const candidateRetriever = displayQuestion.candidate_retriever || jobStatus?.candidate_retriever || 'multiroute';
+  const rerankRetriever = displayQuestion.rerank_retriever || jobStatus?.rerank_retriever || candidateRetriever;
+  const pipelineFeatures = [
+    ['Context', displayQuestion.context_expansion ?? jobStatus?.context_expansion],
+    ['Adaptive', displayQuestion.adaptive_rerank_boost ?? jobStatus?.adaptive_rerank_boost],
+    ['GraphBoost', displayQuestion.graph_context_boost ?? jobStatus?.graph_context_boost],
+    ['Guard', displayQuestion.evidence_guard ?? jobStatus?.evidence_guard],
+    ['EnhancedEdges', displayQuestion.enhanced_context_edges ?? jobStatus?.enhanced_context_edges],
+  ]
+    .filter(([, value]) => enabledFlag(value as number | boolean | undefined))
+    .map(([label]) => label as string);
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-blue-50 via-sky-50 to-cyan-50">
@@ -188,6 +205,13 @@ export function EvidencePage({ data, question, request, onBack }: EvidencePagePr
             <SummaryCell label="视觉节点" value={displayQuestion.visual_node_steps} />
             <SummaryCell label="裁剪图" value={displayQuestion.crop_steps} />
           </div>
+
+          <PipelineStatus
+            variant={pipelineVariant}
+            candidateRetriever={candidateRetriever}
+            rerankRetriever={rerankRetriever}
+            features={pipelineFeatures}
+          />
 
           {displayQuestion.quality_issues.length > 0 && (
             <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-800">
@@ -252,6 +276,31 @@ function SummaryCell({ label, value }: { label: string; value: string | number }
     <div className="rounded-lg bg-slate-50 p-3">
       <div className="text-lg font-semibold text-slate-950">{value}</div>
       <div>{label}</div>
+    </div>
+  );
+}
+
+function PipelineStatus({
+  variant,
+  candidateRetriever,
+  rerankRetriever,
+  features,
+}: {
+  variant: string;
+  candidateRetriever: string;
+  rerankRetriever: string;
+  features: string[];
+}) {
+  return (
+    <div className="mt-4 flex flex-wrap items-center gap-2 rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2 text-xs text-blue-800">
+      <span className="rounded-full bg-white px-2.5 py-1 font-semibold text-blue-900">{variant}</span>
+      <span>retrieve: {candidateRetriever}</span>
+      <span>rerank: {rerankRetriever}</span>
+      {features.map((feature) => (
+        <span key={feature} className="rounded-full bg-white/80 px-2.5 py-1">
+          {feature}
+        </span>
+      ))}
     </div>
   );
 }

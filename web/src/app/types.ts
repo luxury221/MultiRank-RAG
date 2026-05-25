@@ -17,6 +17,21 @@ export interface QuestionItem {
   gold_pages: string[];
   gold_modalities: string[];
   evidence_note: string;
+  pipeline_mode?: string;
+  pipeline_variant?: string;
+  effect_priority?: number;
+  candidate_retriever?: string;
+  rerank_retriever?: string;
+  candidate_k?: number;
+  rerank_k?: number;
+  context_expansion?: number;
+  adaptive_rerank_boost?: number;
+  graph_context_boost?: number;
+  evidence_guard?: number;
+  enhanced_context_edges?: number;
+  embedding_provider?: string;
+  embedding_model?: string;
+  graph_edge_count?: number;
   card_url: string;
   num_steps: number;
   quality_status: string;
@@ -26,6 +41,12 @@ export interface QuestionItem {
   crop_steps: number;
   existing_crop_steps: number;
   qwen_caption_steps: number;
+  visual_caption_provider?: string;
+  visual_caption_model?: string;
+  visual_caption_count?: number;
+  kg_enabled?: boolean;
+  kg_entity_count?: number;
+  kg_relation_count?: number;
   source_pages: string[];
 }
 
@@ -133,6 +154,16 @@ export interface UploadJobStatus {
   pdf_name: string;
   question: string;
   chunk_template?: ChunkTemplate;
+  pipeline_mode?: string;
+  pipeline_variant?: string;
+  effect_priority?: number;
+  candidate_retriever?: string;
+  rerank_retriever?: string;
+  context_expansion?: number;
+  adaptive_rerank_boost?: number;
+  graph_context_boost?: number;
+  evidence_guard?: number;
+  enhanced_context_edges?: number;
   message?: string;
   logs?: string[];
   error?: string;

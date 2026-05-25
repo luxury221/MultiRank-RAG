@@ -253,11 +253,11 @@ AFTER_SALES_MANUAL_HINTS = (
     "manual",
     "after-sales",
     "customer service",
-    "datafountain_customer_service",
+    "manual_customer_service",
     "manual_qa",
 )
 
-DATAFOUNTAIN_PRODUCT_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+MANUAL_PRODUCT_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("空调", ("空调", "air conditioner", "air conditioning", " ac ")),
     ("电钻", ("电钻", "drill", "electric drill")),
     ("空气净化器", ("空气净化器", "air purifier")),
@@ -293,7 +293,7 @@ DATAFOUNTAIN_PRODUCT_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("电动牙刷", ("electric toothbrush", "toothbrush")),
 )
 
-DATAFOUNTAIN_EXTRA_PRODUCT_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+MANUAL_EXTRA_PRODUCT_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("coffee_machine", ("coffee machine", "coffee maker", "nespresso", "espresso", "lungo")),
     ("boat", ("boat", "anchor light", "sail", "stern light", "navigation light")),
     ("loudspeaker", ("loudspeaker", "speaker", "wireless speaker")),
@@ -1777,7 +1777,7 @@ def _alias_in_text(alias: str, text: str) -> bool:
 def matched_product_groups(question: dict[str, Any]) -> list[tuple[str, tuple[str, ...]]]:
     blob = f" {_question_blob(question)} "
     matches: list[tuple[str, tuple[str, ...]]] = []
-    for canonical, aliases in (*DATAFOUNTAIN_PRODUCT_ALIASES, *DATAFOUNTAIN_EXTRA_PRODUCT_ALIASES):
+    for canonical, aliases in (*MANUAL_PRODUCT_ALIASES, *MANUAL_EXTRA_PRODUCT_ALIASES):
         if _alias_in_text(canonical, blob) or any(_alias_in_text(alias, blob) for alias in aliases):
             matches.append((canonical, aliases))
     return matches
