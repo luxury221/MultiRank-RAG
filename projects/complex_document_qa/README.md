@@ -98,14 +98,16 @@ PDF / benchmark document
 
 ## Evaluation Snapshot
 
-公开消融实验使用 V0-V5 验证每个模块的贡献。当前最适合汇报的结论是：
+公开评测统一记录在根目录 README 的“公开评测与消融结果”中，覆盖文本手册、表格数值推理、长文档视觉 grounding 和多跳证据链四类任务。当前最适合汇报的结论是：
 
-- RAGBench eManual：基础文本检索已经接近饱和，可作为负控制。
-- T2/FinQA：V5 将 nDCG@5 从 0.678 提升到 0.878，体现表格/上下文感知重排收益。
-- MultiHop-RAG：V5 将 evidence-chain score 提升到 0.890，gold node coverage 提升到 0.730。
-- MMLongBench-Doc：BM25 Hit@5 约 0.07；接入 Doubao embedding-vision 后 Hit@5 达到 0.91，Strict Visual@5 达到 0.91。
+| Dataset | Best / Key Setting | Main Result |
+|---|---|---|
+| RAGBench eManual | BM25 V0-V5 | Hit@5/10 已达到 1.000，说明简单文本手册任务接近饱和，可作为负控制。 |
+| T2/FinQA | BM25 V5 | nDCG@5 从 0.678 提升到 0.878，体现表格与上下文感知重排收益。 |
+| MMLongBench-Doc | Doubao Vision Embedding V2/V4/V5 | Hit@5 从 BM25 的 0.070 提升到 0.910，Strict Visual@5 达到 0.910。 |
+| MultiHop-RAG | BM25 V5 | evidence-chain score 达到 0.890，gold node coverage 达到 0.730。 |
 
-MMLongBench-Doc 视觉复测结果见 `docs/mmlongbench_doc_visual_retest_20260525.csv`。这组实验关闭答案生成，重点评估页面级视觉 grounding 和证据召回质量。
+这组结果共同说明：系统在简单文本任务上保持稳定，在表格/多跳任务上体现重排和证据链收益，在视觉长文档任务上通过页面级视觉 embedding 打开多模态 grounding 能力。
 
 ## Main Paths
 
@@ -153,6 +155,6 @@ npm run dev
 python scripts/06_run_pipeline.py --questions data/questions.csv
 ```
 
-## Boundary
+## Positioning
 
-阿里天池法律比赛相关内容已经单独归入 `competitions/tianchi_legal/`。它可以复用本项目的 RAG 思想和部分模块，但不作为主项目的展示入口。
+本目录是复杂文档 QA 项目的展示入口。报告、README、主链路和评测结果都围绕复杂 PDF / 图文混排资料的多模态证据问答展开。

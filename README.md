@@ -1,14 +1,5 @@
 # MultiRank-RAG
 
-## 仓库分区
-
-本仓库现在按两个清晰工作面组织：
-
-- `projects/complex_document_qa/`：复杂文档问答系统主项目，包含前后端展示入口、核心代码索引、项目报告和作品材料。
-- `competitions/tianchi_legal/`：阿里天池法律问答比赛分区，包含比赛专用链路、离线脚本、Kaggle notebook、文档和历史提交快照。
-
-核心代码仍保留在 `backend/`、`web/`、`multirank_rag/` 和 `scripts/` 原路径，保证已有命令、前后端启动和实验链路不会因为整理目录而失效。
-
 面向复杂 PDF 文档的多模态 RAG、GraphRAG 与证据链问答系统。
 
 MultiRank-RAG 的目标不是只返回一个答案，而是从复杂文档中检索、组织并展示一条可追溯的证据链。系统会把 PDF 中的文本、标题、表格、图片、图注、公式、页面布局等信息统一建模为 evidence nodes，再通过混合召回、多路融合、GraphRAG、查询自适应重排序和自我修正机制，生成带证据引用的最终回答与可视化证据卡片。
@@ -258,11 +249,11 @@ ABECD + Evidence Guard + SelfCorrect merge-v2
 
 公开数据集全量消融中，增强主线在表格证据排序、多跳证据链覆盖和多模态 grounding 指标上体现出更稳定的优势；在简单文本手册类数据上，基础检索已经接近饱和，增强策略不一定继续提升。
 
-## 公开数据集主实验
+## 公开评测与消融结果
 
-仓库记录了一次公开数据集 V0-V5 全量消融实验，用于验证结构化 chunk、多模态证据、GraphRAG、MultiRank 重排和 ABECD + Guard 增强主线的贡献。为了控制变量，这组实验固定使用 `bm25` 召回、`candidate-k=50`、`rerank-k=10`，并关闭答案生成，避免外部 API 和大模型生成波动影响检索/证据链指标。
+公开评测用于回答两个问题：一是 V0-V5 每个模块是否带来稳定收益，二是复杂多模态文档在接入视觉语义检索后能否真正完成页面级 grounding。所有实验均关闭答案生成，重点评估证据检索、排序、视觉定位和证据链质量，避免外部大模型生成波动影响结论。
 
-运行命令：
+BM25 消融命令：
 
 ```bash
 python scripts/40_run_main_experiment.py \
@@ -279,31 +270,7 @@ python scripts/40_run_main_experiment.py \
   --clean
 ```
 
-结果摘要如下，完整结果见 [docs/PUBLIC_BENCHMARK_RESULTS.md](docs/PUBLIC_BENCHMARK_RESULTS.md) 和 [docs/public_benchmark_ablation_20260520.csv](docs/public_benchmark_ablation_20260520.csv)。
-
-| 数据集 | 任务侧重 | 关键结论 |
-|---|---|---|
-| RAGBench eManual | 文本/手册问答 | V0 已达到 Recall@5/10=1.000，说明简单文本手册任务已接近饱和，可作为负控制。 |
-| T2/FinQA | 表格与数值推理 | V5 将 nDCG@5 从 0.678 提升到 0.878，说明表格/上下文感知重排改善了证据排序质量。 |
-| MMLongBench-Doc | 多模态长文档 grounding | BM25 只能匹配页面占位文本，Hit@5 约 0.07；接入 Doubao embedding-vision 后，页面级视觉召回 Hit@5 提升到 0.91，说明该数据集真正考察的是图像页面与问题语义的对齐。 |
-| MultiHop-RAG | 多跳与跨文档检索 | V4/V5 将 Recall@10 从 0.900 提升到 0.910；V5 将证据链分数从 0.864 提升到 0.890，gold node coverage 从 0.662 提升到 0.730。 |
-
-V0-V5 的含义：
-
-| Variant | 说明 |
-|---|---|
-| V0 | text-only baseline |
-| V1 | + structured evidence nodes |
-| V2 | + visual evidence fields |
-| V3 | + GraphRAG retrieval signal |
-| V4 | full MultiRank-RAG evidence chain |
-| V5 | ABECD + Evidence Guard enhanced pipeline |
-
-### MMLongBench-Doc 视觉复测
-
-MMLongBench-Doc 的节点是页面图片，旧版 BM25 实验只能检索 `MMLongBench-Doc page image` 这类占位文本，因此 Recall/Hit 偏低。复测时改用 `doubao-embedding-vision-250615` 对问题文本和页面图像分别编码，再用 embedding 召回进入 V2/V4/V5 重排链路。
-
-复测命令：
+MMLongBench-Doc 视觉复测命令：
 
 ```bash
 python scripts/40_run_main_experiment.py \
@@ -320,16 +287,57 @@ python scripts/40_run_main_experiment.py \
   --clean
 ```
 
-关键结果：
+统一结果表如下。`Hit@K` 对应原结果文件中的 `recall_at_k`，表示 top-K 中是否命中至少一个标准证据；MMLongBench-Doc 的 `Strict Visual@5` 要求 top5 中命中标准视觉页面，比宽松的 visual grounding 指标更适合汇报。RAGBench eManual 的 nDCG@5 保留原始评测脚本输出，因多证据权重口径会超过 1，汇报时更建议强调其 Hit@5/10 已经饱和。
 
-| Setting | Hit@5 | Hit@10 | MRR | nDCG@5 | Strict Visual@5 |
-|---|---:|---:|---:|---:|---:|
-| BM25 V2 | 0.070 | 0.070 | 0.070 | 0.070 | 0.070 |
-| Doubao Vision V2 | 0.910 | 0.930 | 0.847 | 0.736 | 0.910 |
-| Doubao Vision V4 | 0.910 | 0.920 | 0.846 | 0.742 | 0.910 |
-| Doubao Vision V5 | 0.910 | 0.920 | 0.846 | 0.742 | 0.910 |
+| Dataset | Retrieval | Variant | Method | N | Hit@1 | Hit@5 | Hit@10 | MRR | nDCG@5 | Chain Score | Gold Coverage | Strict Visual@5 |
+|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| RAGBench eManual | BM25 | V0 | G1 | 66 | 0.833 | 1.000 | 1.000 | 0.899 | 1.183 | - | - | - |
+| RAGBench eManual | BM25 | V1 | G1 | 66 | 0.833 | 1.000 | 1.000 | 0.899 | 1.183 | - | - | - |
+| RAGBench eManual | BM25 | V2 | G1 | 66 | 0.833 | 1.000 | 1.000 | 0.899 | 1.183 | - | - | - |
+| RAGBench eManual | BM25 | V3 | G1 | 66 | 0.833 | 1.000 | 1.000 | 0.899 | 1.183 | - | - | - |
+| RAGBench eManual | BM25 | V4 | G4 | 66 | 0.833 | 1.000 | 1.000 | 0.899 | 1.183 | 0.981 | 1.000 | - |
+| RAGBench eManual | BM25 | V5 | G4 | 66 | 0.833 | 1.000 | 1.000 | 0.894 | 1.156 | 0.981 | 1.000 | - |
+| T2/FinQA | BM25 | V0 | G1 | 100 | 0.830 | 0.990 | 1.000 | 0.908 | 0.678 | - | - | - |
+| T2/FinQA | BM25 | V1 | G1 | 100 | 0.830 | 0.990 | 1.000 | 0.908 | 0.678 | - | - | - |
+| T2/FinQA | BM25 | V2 | G1 | 100 | 0.840 | 0.990 | 1.000 | 0.913 | 0.683 | - | - | - |
+| T2/FinQA | BM25 | V3 | G1 | 100 | 0.840 | 0.990 | 1.000 | 0.913 | 0.683 | - | - | - |
+| T2/FinQA | BM25 | V4 | G4 | 100 | 0.840 | 0.990 | 1.000 | 0.913 | 0.695 | 0.981 | 0.950 | - |
+| T2/FinQA | BM25 | V5 | G4 | 100 | 0.840 | 0.990 | 1.000 | 0.895 | 0.878 | 0.979 | 0.965 | - |
+| MMLongBench-Doc | BM25 | V0 | G1 | 100 | 0.070 | 0.070 | 0.070 | 0.070 | 0.070 | - | - | - |
+| MMLongBench-Doc | BM25 | V1 | G1 | 100 | 0.070 | 0.070 | 0.070 | 0.070 | 0.070 | - | - | - |
+| MMLongBench-Doc | BM25 | V2 | G1 | 100 | 0.070 | 0.070 | 0.070 | 0.070 | 0.070 | - | - | 0.070 |
+| MMLongBench-Doc | BM25 | V3 | G1 | 100 | 0.070 | 0.070 | 0.070 | 0.070 | 0.070 | - | - | 0.070 |
+| MMLongBench-Doc | BM25 | V4 | G4 | 100 | 0.070 | 0.070 | 0.090 | 0.073 | 0.070 | 0.530 | 0.015 | 0.070 |
+| MMLongBench-Doc | BM25 | V5 | G4 | 100 | 0.070 | 0.070 | 0.090 | 0.073 | 0.070 | 0.527 | 0.009 | 0.070 |
+| MMLongBench-Doc | Doubao Vision Embedding | V2 | G1 | 100 | 0.800 | 0.910 | 0.930 | 0.847 | 0.736 | - | - | 0.910 |
+| MMLongBench-Doc | Doubao Vision Embedding | V4 | G4 | 100 | 0.800 | 0.910 | 0.920 | 0.846 | 0.742 | 0.568 | 0.116 | 0.910 |
+| MMLongBench-Doc | Doubao Vision Embedding | V5 | G4 | 100 | 0.800 | 0.910 | 0.920 | 0.846 | 0.742 | 0.552 | 0.074 | 0.910 |
+| MultiHop-RAG | BM25 | V0 | G1 | 100 | 0.670 | 0.890 | 0.900 | 0.755 | 0.615 | - | - | - |
+| MultiHop-RAG | BM25 | V1 | G1 | 100 | 0.670 | 0.890 | 0.900 | 0.755 | 0.615 | - | - | - |
+| MultiHop-RAG | BM25 | V2 | G1 | 100 | 0.670 | 0.890 | 0.900 | 0.755 | 0.615 | - | - | - |
+| MultiHop-RAG | BM25 | V3 | G1 | 100 | 0.670 | 0.890 | 0.900 | 0.755 | 0.615 | - | - | - |
+| MultiHop-RAG | BM25 | V4 | G4 | 100 | 0.660 | 0.890 | 0.910 | 0.752 | 0.616 | 0.864 | 0.662 | - |
+| MultiHop-RAG | BM25 | V5 | G4 | 100 | 0.660 | 0.890 | 0.910 | 0.752 | 0.615 | 0.890 | 0.730 | - |
 
-完整结果见 [docs/mmlongbench_doc_visual_retest_20260525.csv](docs/mmlongbench_doc_visual_retest_20260525.csv)。汇报时建议把这组结果作为“视觉语义召回打开后，系统从文本 RAG 升级到页面级多模态 grounding”的关键证据；同时说明这组实验关闭了答案生成，指标衡量的是证据检索与视觉定位质量。
+主要结论：
+
+- RAGBench eManual 在 V0 已经 Hit@5/10=1.000，说明简单文本手册任务接近饱和，适合作为负控制。
+- T2/FinQA 的 V5 将 nDCG@5 从 0.678 提升到 0.878，说明表格和上下文感知重排改善了证据排序质量。
+- MMLongBench-Doc 在 BM25 下只能匹配页面占位文本，Hit@5 约 0.070；接入 Doubao 视觉 embedding 后 Hit@5 达到 0.910，Strict Visual@5 达到 0.910，证明视觉语义召回是长文档页面 grounding 的关键。
+- MultiHop-RAG 的 V5 将证据链分数提升到 0.890，gold node coverage 提升到 0.730，体现多跳证据链组织的收益。
+
+完整结果文件见 [docs/public_benchmark_ablation_20260520.csv](docs/public_benchmark_ablation_20260520.csv) 和 [docs/mmlongbench_doc_visual_retest_20260525.csv](docs/mmlongbench_doc_visual_retest_20260525.csv)。
+
+V0-V5 的含义：
+
+| Variant | 说明 |
+|---|---|
+| V0 | text-only baseline |
+| V1 | + structured evidence nodes |
+| V2 | + visual evidence fields |
+| V3 | + GraphRAG retrieval signal |
+| V4 | full MultiRank-RAG evidence chain |
+| V5 | ABECD + Evidence Guard enhanced pipeline |
 
 内置 `data/sample` 仍保留为轻量烟测数据，用于快速验证 pipeline 是否能从解析、召回、重排跑到证据链生成；公开数据集结果才是当前 README 的主实验依据。
 
