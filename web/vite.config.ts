@@ -10,6 +10,9 @@ export default defineConfig({
   cacheDir,
   plugins: [react(), tailwindcss()],
   server: {
+    proxy: {
+      '/api': 'http://127.0.0.1:8765',
+    },
     watch: {
       usePolling: true,
       interval: 1000,

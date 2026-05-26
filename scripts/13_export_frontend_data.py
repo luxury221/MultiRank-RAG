@@ -10,10 +10,13 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB_PUBLIC = ROOT / "web" / "public"
+DETAILS_DIR = WEB_PUBLIC / "app-data" / "details"
+RANKINGS_DIR = WEB_PUBLIC / "app-data" / "rankings"
 
 QUESTIONS_CSV = ROOT / "data" / "questions.csv"
 PDF_DIR = ROOT / "data" / "pdfs"
@@ -103,6 +106,7 @@ def trim_text(value: str | None, max_len: int = 520) -> str:
 def clean_generated_assets() -> None:
     WEB_PUBLIC.mkdir(parents=True, exist_ok=True)
     for rel in [
+        "app-data",
         "outputs/evidence_cards",
         "outputs/visual/crops",
         "outputs/visual/pages",
@@ -110,6 +114,14 @@ def clean_generated_assets() -> None:
         target = WEB_PUBLIC / rel
         if target.exists():
             shutil.rmtree(target)
+
+
+def detail_url_for(question_id: str) -> str:
+    return f"/app-data/details/{quote(question_id, safe='')}.json"
+
+
+def ranking_url_for(question_id: str) -> str:
+    return f"/app-data/rankings/{quote(question_id, safe='')}.json"
 
 
 def build_pdf_index(nodes: list[dict[str, Any]], questions: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -230,6 +242,8 @@ def main() -> None:
         card = card_by_qid.get(qid, {})
         quality = quality_by_qid.get(qid, {})
         card_url = public_url(card.get("card_path") or quality.get("card_path"), copied_assets)
+        chain_count = len(chains.get(qid, []))
+        num_steps = as_int(card.get("num_steps"), chain_count) or chain_count
         exported_questions.append(
             {
                 "question_id": qid,
@@ -242,7 +256,9 @@ def main() -> None:
                 "gold_modalities": split_values(row.get("gold_modalities")),
                 "evidence_note": row.get("evidence_note", ""),
                 "card_url": card_url,
-                "num_steps": as_int(card.get("num_steps")),
+                "detail_url": detail_url_for(qid),
+                "ranking_url": ranking_url_for(qid),
+                "num_steps": num_steps,
                 "quality_status": quality.get("status", ""),
                 "quality_issues": split_values(quality.get("issues")),
                 "visual_required": as_int(quality.get("visual_required")),
@@ -266,6 +282,26 @@ def main() -> None:
     pdfs = build_pdf_index(nodes, questions)
     parsed_pdf_count = len([pdf for pdf in pdfs if pdf.get("pages") or pdf.get("node_count")])
 
+    DETAILS_DIR.mkdir(parents=True, exist_ok=True)
+    RANKINGS_DIR.mkdir(parents=True, exist_ok=True)
+    for question in exported_questions:
+        qid = question["question_id"]
+        detail_path = WEB_PUBLIC / question["detail_url"].lstrip("/")
+        ranking_path = WEB_PUBLIC / question["ranking_url"].lstrip("/")
+        detail_payload = {
+            "question_id": qid,
+            "steps": chains.get(qid, []),
+            "rankings": {},
+        }
+        ranking_payload = {
+            "question_id": qid,
+            "rankings": normalized_rankings.get(qid, {}),
+        }
+        with detail_path.open("w", encoding="utf-8") as f:
+            json.dump(detail_payload, f, ensure_ascii=False, separators=(",", ":"))
+        with ranking_path.open("w", encoding="utf-8") as f:
+            json.dump(ranking_payload, f, ensure_ascii=False, separators=(",", ":"))
+
     app_data = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "corpus": {
@@ -279,8 +315,8 @@ def main() -> None:
         },
         "pdfs": pdfs,
         "questions": exported_questions,
-        "chains": chains,
-        "rankings": normalized_rankings,
+        "chains": {},
+        "rankings": {},
         "metrics": metrics,
     }
 
@@ -289,6 +325,8 @@ def main() -> None:
         json.dump(app_data, f, ensure_ascii=False, indent=2)
 
     print(f"Exported {len(exported_questions)} questions to {output_path}")
+    print(f"Exported {len(exported_questions)} question details to {DETAILS_DIR}")
+    print(f"Exported {len(exported_questions)} ranking details to {RANKINGS_DIR}")
     print(f"Copied {len(copied_assets)} visual assets into {WEB_PUBLIC}")
 
 

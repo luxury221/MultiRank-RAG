@@ -1,0 +1,32 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        libglib2.0-0 \
+        libgl1 \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.backend.txt pyproject.toml ./
+RUN python -m pip install --upgrade pip \
+    && pip install --retries 10 --timeout 120 -r requirements.backend.txt
+
+COPY backend ./backend
+COPY multirank_rag ./multirank_rag
+COPY scripts ./scripts
+
+RUN mkdir -p /app/data /app/outputs/upload_jobs
+
+EXPOSE 8765
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8765/api/health || exit 1
+
+CMD ["python", "-m", "uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "8765"]

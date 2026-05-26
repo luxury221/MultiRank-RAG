@@ -18,7 +18,7 @@ def rel_file_url(job_id: str, path: str | Path) -> str:
         rel = target.relative_to(base)
     except ValueError:
         return ""
-    return f"http://127.0.0.1:8765/api/jobs/{job_id}/files/{rel.as_posix()}"
+    return f"/api/jobs/{job_id}/files/{rel.as_posix()}"
 
 
 def normalize_step_for_frontend(job_id: str, step: dict[str, Any]) -> dict[str, Any]:

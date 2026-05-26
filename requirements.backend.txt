@@ -1,0 +1,12 @@
+fastapi
+networkx
+numpy
+openai
+pandas
+pillow
+pymupdf
+pypdf
+pdfplumber
+python-multipart
+scikit-learn
+uvicorn[standard]

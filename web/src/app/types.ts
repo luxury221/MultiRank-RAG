@@ -17,6 +17,8 @@ export interface QuestionItem {
   gold_pages: string[];
   gold_modalities: string[];
   evidence_note: string;
+  detail_url?: string;
+  ranking_url?: string;
   pipeline_mode?: string;
   pipeline_variant?: string;
   effect_priority?: number;
@@ -83,6 +85,12 @@ export interface RankingItem {
   source_ref: string;
   content_preview: string;
   crop_url: string;
+}
+
+export interface QuestionDetail {
+  question_id: string;
+  steps: EvidenceStep[];
+  rankings: Record<string, RankingItem[]>;
 }
 
 export interface MetricRow {

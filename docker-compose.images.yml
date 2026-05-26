@@ -1,0 +1,31 @@
+services:
+  backend:
+    image: ${BACKEND_IMAGE:-ghcr.io/luxury221/multirank-rag-backend:latest}
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      RAG_PDF_PARSER: ${RAG_PDF_PARSER:-native}
+      RAG_BACKEND_PIPELINE_MODE: ${RAG_BACKEND_PIPELINE_MODE:-quality}
+      RAG_BACKEND_PIPELINE_VARIANT: ${RAG_BACKEND_PIPELINE_VARIANT:-V5-docker-prod}
+      RAG_BACKEND_CANDIDATE_RETRIEVER: ${RAG_BACKEND_CANDIDATE_RETRIEVER:-lexical}
+      RAG_BACKEND_RERANK_RETRIEVER: ${RAG_BACKEND_RERANK_RETRIEVER:-lexical}
+      RAG_VISUAL_CAPTION_PROVIDER: ${RAG_VISUAL_CAPTION_PROVIDER:-local}
+      RAG_ANSWER_PROVIDER: ${RAG_ANSWER_PROVIDER:-fallback}
+      RAG_BACKEND_ENABLE_KG: ${RAG_BACKEND_ENABLE_KG:-1}
+      RAG_KG_DIR: ${RAG_KG_DIR:-outputs/graphrag}
+    volumes:
+      - ./data:/app/data:ro
+      - ./outputs:/app/outputs
+    ports:
+      - "8765:8765"
+    restart: unless-stopped
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-ghcr.io/luxury221/multirank-rag-frontend:latest}
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "8080:80"
+    restart: unless-stopped

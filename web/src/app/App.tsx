@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type FormEvent, type ReactNode } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -21,9 +21,9 @@ import {
   Sparkles,
   Upload,
 } from 'lucide-react';
-import type { AppData, ChunkTemplate, EvidenceStep, PdfItem, QuestionItem, UploadJobStatus } from './types';
+import type { AppData, ChunkTemplate, EvidenceStep, PdfItem, QuestionDetail, QuestionItem, UploadJobStatus } from './types';
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8765';
+const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 
 type MenuId = 'workspace' | 'documents' | 'questions' | 'upload' | 'metrics' | 'settings';
 type BackendStatus = 'checking' | 'online' | 'offline';
@@ -144,11 +144,23 @@ function categoryMatches(question: QuestionItem, category: string, companies: st
   return true;
 }
 
-function getQuestionStatus(question: QuestionItem, steps: EvidenceStep[]) {
-  if (steps.length > 0 && question.card_url) {
+function getQuestionDetailUrl(question: QuestionItem) {
+  return question.detail_url || `/app-data/details/${encodeURIComponent(question.question_id)}.json`;
+}
+
+function getQuestionStepCount(question: QuestionItem, data?: AppData) {
+  return question.num_steps || (data?.chains[question.question_id] ?? []).length;
+}
+
+function getChainReadyCount(data: AppData) {
+  return data.questions.filter((question) => getQuestionStepCount(question, data) > 0).length;
+}
+
+function getQuestionStatus(question: QuestionItem, stepCount: number) {
+  if (stepCount > 0 && question.card_url) {
     return 'ready';
   }
-  if (steps.length > 0) {
+  if (stepCount > 0) {
     return 'chain';
   }
   return 'empty';
@@ -196,6 +208,8 @@ function useIsMobile() {
 export default function App() {
   const [data, setData] = useState<AppData | null>(null);
   const [error, setError] = useState('');
+  const [questionDetails, setQuestionDetails] = useState<Record<string, QuestionDetail>>({});
+  const [loadingDetailId, setLoadingDetailId] = useState('');
   const [currentMenu, setCurrentMenu] = useState<MenuId>('upload');
   const [selectedQuestionId, setSelectedQuestionId] = useState('');
   const [query, setQuery] = useState('');
@@ -252,21 +266,65 @@ export default function App() {
     return data.questions.find((question) => question.question_id === selectedQuestionId) ?? data.questions[0] ?? null;
   }, [data, selectedQuestionId]);
 
+  useEffect(() => {
+    if (!selectedQuestion) {
+      return;
+    }
+
+    const qid = selectedQuestion.question_id;
+    if (!qid || questionDetails[qid]) {
+      return;
+    }
+
+    const controller = new AbortController();
+    setLoadingDetailId(qid);
+
+    async function loadQuestionDetail() {
+      try {
+        const response = await fetch(getQuestionDetailUrl(selectedQuestion), {
+          cache: 'force-cache',
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error(`detail ${response.status}`);
+        }
+        const detail = (await response.json()) as QuestionDetail;
+        setQuestionDetails((current) => ({ ...current, [qid]: detail }));
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          console.warn('Failed to load question detail', err);
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoadingDetailId((current) => (current === qid ? '' : current));
+        }
+      }
+    }
+
+    loadQuestionDetail();
+    return () => {
+      controller.abort();
+    };
+  }, [questionDetails, selectedQuestion]);
+
+  const selectedDetail = selectedQuestion ? questionDetails[selectedQuestion.question_id] : null;
+
   const selectedSteps = useMemo(() => {
     if (!data || !selectedQuestion) {
       return [];
     }
-    return [...(data.chains[selectedQuestion.question_id] ?? [])].sort(
+    const detailSteps = selectedDetail?.steps ?? data.chains[selectedQuestion.question_id] ?? [];
+    return [...detailSteps].sort(
       (a, b) => b.score - a.score || a.chain_step - b.chain_step,
     );
-  }, [data, selectedQuestion]);
+  }, [data, selectedDetail, selectedQuestion]);
 
-  if (error) {
-    return <ErrorState error={error} />;
+  if (error && !data) {
+    return <StartupUpload backendStatus={backendStatus} dataError={error} />;
   }
 
   if (!data) {
-    return <LoadingState />;
+    return <StartupUpload backendStatus={backendStatus} />;
   }
 
   if (isMobile) {
@@ -287,7 +345,7 @@ export default function App() {
       <TopNavBar data={data} backendStatus={backendStatus} />
       <div className="flex items-start">
         <Sidebar currentMenu={currentMenu} onMenuChange={setCurrentMenu} />
-        <main className="min-w-0 flex-1">
+        <main className="min-w-0 flex-1" aria-busy={Boolean(loadingDetailId)}>
           {currentMenu === 'workspace' && (
             <WorkspaceView
               data={data}
@@ -333,6 +391,43 @@ export default function App() {
           )}
         </main>
       </div>
+    </div>
+  );
+}
+
+function StartupUpload({ backendStatus, dataError }: { backendStatus: BackendStatus; dataError?: string }) {
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-950">
+      <header className="flex h-16 items-center justify-between border-b border-slate-200 bg-white px-6 shadow-sm">
+        <div className="flex items-center gap-3">
+          <div className="grid h-10 w-10 place-items-center rounded-lg bg-gradient-to-br from-blue-600 to-cyan-500 text-lg font-bold text-white">
+            M
+          </div>
+          <div>
+            <h1 className="text-lg font-semibold tracking-normal text-slate-950">复杂文档证据问答</h1>
+            <p className="text-xs text-slate-500">案例数据仍在加载时，也可以先上传 PDF 分析。</p>
+          </div>
+        </div>
+        <span
+          className={cn(
+            'inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs font-medium',
+            backendStatus === 'online'
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+              : backendStatus === 'checking'
+                ? 'border-blue-200 bg-blue-50 text-blue-700'
+                : 'border-rose-200 bg-rose-50 text-rose-700',
+          )}
+        >
+          <Activity size={14} />
+          {backendStatus === 'online' ? '在线分析就绪' : backendStatus === 'checking' ? '正在连接后端' : '后端未连接'}
+        </span>
+      </header>
+      {dataError && (
+        <div className="mx-6 mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">
+          历史案例数据暂时没有加载成功：{dataError}。上传分析功能仍可继续使用。
+        </div>
+      )}
+      <UploadAnalysis />
     </div>
   );
 }
@@ -473,7 +568,7 @@ function WorkspaceView({
 function DataHealthBar({ data }: { data: AppData }) {
   const totalQuestions = data.questions.length;
   const visiblePdfs = getVisiblePdfs(data.pdfs);
-  const chainReady = data.questions.filter((question) => (data.chains[question.question_id] ?? []).length > 0).length;
+  const chainReady = getChainReadyCount(data);
   const cardCount = data.questions.filter((question) => question.card_url).length || data.corpus.num_cards;
   const hasNoEvidence = totalQuestions > 0 && (chainReady === 0 || cardCount === 0);
 
@@ -605,8 +700,8 @@ function QuestionList({
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {filteredQuestions.map((question) => {
           const companies = inferCompanies(question);
-          const steps = data.chains[question.question_id] ?? [];
-          const status = getQuestionStatus(question, steps);
+          const stepCount = getQuestionStepCount(question, data);
+          const status = getQuestionStatus(question, stepCount);
           return (
             <button
               key={question.question_id}
@@ -1046,6 +1141,7 @@ function UploadAnalysis({ data, onOpenWorkspace }: { data?: AppData; onOpenWorks
   const [jobStatus, setJobStatus] = useState<UploadJobStatus | null>(null);
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeRunRef = useRef(0);
 
   const canSubmit = Boolean(file) && question.trim().length > 0 && !isSubmitting;
@@ -1058,11 +1154,25 @@ function UploadAnalysis({ data, onOpenWorkspace }: { data?: AppData; onOpenWorks
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const nextFile = event.target.files?.[0] ?? null;
+    selectFile(nextFile);
+  };
+
+  const selectFile = (nextFile: File | null) => {
     activeRunRef.current += 1;
     setFile(nextFile);
     setError('');
     setJobStatus(null);
     setIsSubmitting(false);
+  };
+
+  const handleDrop = (event: DragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    const nextFile = event.dataTransfer.files?.[0] ?? null;
+    if (nextFile && nextFile.type !== 'application/pdf' && !nextFile.name.toLowerCase().endsWith('.pdf')) {
+      setError('只支持上传 PDF 文件');
+      return;
+    }
+    selectFile(nextFile);
   };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -1154,14 +1264,31 @@ function UploadAnalysis({ data, onOpenWorkspace }: { data?: AppData; onOpenWorks
           <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">即时解读</span>
           </div>
 
-          <form onSubmit={handleSubmit} className="grid gap-6 lg:grid-cols-[1fr_1.1fr]">
-          <label className="block cursor-pointer rounded-lg border-2 border-dashed border-blue-300 bg-blue-50/40 p-8 text-center transition hover:bg-blue-50">
-            <input className="hidden" type="file" accept="application/pdf,.pdf" onChange={handleFileChange} />
+            <form onSubmit={handleSubmit} className="grid gap-6 lg:grid-cols-[1fr_1.1fr]">
+          <label
+            className="block cursor-pointer rounded-lg border-2 border-dashed border-blue-300 bg-blue-50/40 p-8 text-center transition hover:bg-blue-50"
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={handleDrop}
+          >
+            <input
+              ref={fileInputRef}
+              className="hidden"
+              type="file"
+              accept="application/pdf,.pdf"
+              onChange={handleFileChange}
+            />
             <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full bg-blue-100 text-blue-600">
               <Upload size={32} />
             </div>
             <p className="font-medium text-slate-950">{file ? file.name : '点击上传或拖拽 PDF 文件'}</p>
             <p className="mt-1 text-xs text-slate-500">支持年报、研报、合同说明等 PDF 文档。</p>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="mt-4 rounded-lg bg-white px-4 py-2 text-sm font-medium text-blue-700 shadow-sm ring-1 ring-blue-100 transition hover:ring-blue-300"
+            >
+              选择 PDF
+            </button>
           </label>
 
           <div className="space-y-4">
@@ -1207,6 +1334,9 @@ function UploadAnalysis({ data, onOpenWorkspace }: { data?: AppData; onOpenWorks
                   activeRunRef.current += 1;
                   setQuestion('');
                   setFile(null);
+                  if (fileInputRef.current) {
+                    fileInputRef.current.value = '';
+                  }
                   setJobStatus(null);
                   setError('');
                   setIsSubmitting(false);
@@ -1272,7 +1402,7 @@ function UploadAnalysis({ data, onOpenWorkspace }: { data?: AppData; onOpenWorks
 function OfflineDataPreview({ data, onOpenWorkspace }: { data: AppData; onOpenWorkspace?: () => void }) {
   const totalQuestions = data.questions.length;
   const visiblePdfs = getVisiblePdfs(data.pdfs);
-  const chainReady = data.questions.filter((question) => (data.chains[question.question_id] ?? []).length > 0).length;
+  const chainReady = getChainReadyCount(data);
   const parsedDocs = visiblePdfs.filter((pdf) => pdf.pages > 0 || pdf.node_count > 0).length;
   const sampleQuestions = data.questions.slice(0, 3);
 
@@ -1358,7 +1488,7 @@ function MetricBar({ label, value, tone = 'blue' }: { label: string; value: numb
 function MetricsView({ data }: { data: AppData }) {
   const metrics = data.metrics;
   const totalQuestions = data.questions.length;
-  const chainReady = data.questions.filter((question) => (data.chains[question.question_id] ?? []).length > 0).length;
+  const chainReady = getChainReadyCount(data);
   const cardReady = data.questions.filter((question) => question.card_url).length || data.corpus.num_cards;
   const bestVisual = metrics.reduce((best, metric) => Math.max(best, metric.visual_grounding_hit || 0), 0);
   const bestCaption = metrics.reduce((best, metric) => Math.max(best, metric.visual_caption_hit || 0), 0);
