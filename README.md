@@ -598,6 +598,68 @@ outputs/reports/openragbench_experiment_overview_*.csv
 
 ## 工程边界与安全
 
+## Docker 与 CI/CD
+
+项目已经提供可复现的容器化运行与无服务器阶段 CI/CD 链路。当前即使暂时没有公网服务器，也可以完成从代码提交到镜像交付的闭环：
+
+```text
+git push
+  -> GitHub Actions 自动校验后端与前端
+  -> 构建 backend / frontend Docker 镜像
+  -> main 分支推送镜像到 GHCR
+  -> 本地或未来服务器通过 Docker Compose 拉取并运行
+```
+
+本地一键启动：
+
+```bash
+docker compose up --build -d
+```
+
+访问地址：
+
+```text
+http://127.0.0.1:8080
+```
+
+常用检查命令：
+
+```bash
+docker compose ps
+docker compose logs -f backend
+docker compose logs -f frontend
+curl http://127.0.0.1:8080/api/health
+```
+
+当前 Docker 默认使用轻量稳定模式，便于演示和复现：
+
+```text
+RAG_PDF_PARSER=native
+RAG_BACKEND_CANDIDATE_RETRIEVER=lexical
+RAG_BACKEND_RERANK_RETRIEVER=lexical
+RAG_VISUAL_CAPTION_PROVIDER=local
+RAG_ANSWER_PROVIDER=fallback
+```
+
+高质量模型模式可以在 `.env` 中切换到 MinerU、Doubao/Ark、multiroute retrieval 和视觉 caption。真实密钥只放在本地或部署主机的 `.env` 中，不提交到 Git。
+
+CI/CD 配置位于：
+
+```text
+.github/workflows/docker-ci-cd.yml
+docs/DOCKER_CICD.md
+docker-compose.images.yml
+```
+
+有服务器后，只需要在服务器保留 `docker-compose.images.yml`、`.env`、`data/`、`outputs/`，再执行：
+
+```bash
+docker compose -f docker-compose.images.yml pull
+docker compose -f docker-compose.images.yml up -d
+```
+
+因此当前阶段已经完成“代码校验 + 镜像构建 + 镜像发布 + 本地生产化运行”的 CI/CD 主链路；公网部署只差服务器资源与 SSH 自动发布步骤。
+
 - `.env`、API key、上传 PDF、输出结果、外部仓库和大模型权重不会提交到 Git。
 - `outputs/` 只保留 `.gitkeep` 和说明文件，所有实验结果都作为本地运行产物管理。
 - `external/`、用户上传文件和私有文档默认被忽略。
