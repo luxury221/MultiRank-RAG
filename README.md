@@ -71,6 +71,40 @@ PDF / Manual / Knowledge Base
    evidence chain, ranked support evidence, frontend visualization
 ```
 
+## 现场全链路演示
+
+前端上传分析默认使用 `live_fullchain` 模式，适合答辩或现场展示时上传一份小 PDF，完整跑通：
+
+```text
+上传 PDF -> 解析切块 -> 视觉裁剪/定位 -> 文档关系图 -> GraphRAG
+        -> 候选召回 -> MultiRank 重排 -> 证据链 -> 答案 -> 证据卡片
+```
+
+现场建议上传 `1-8` 页、`20MB` 以内的 PDF。系统会保留完整链路，但把候选规模、重排规模、视觉 DPI 和证据链长度控制在适合演示的范围内；如果外部模型、视觉 caption 或证据卡片生成临时失败，后端会退回到本地召回与证据链兜底，保证页面仍然能展示答案、证据节点、页码和处理日志。
+
+Docker 演示默认配置：
+
+```text
+RAG_BACKEND_PIPELINE_MODE=live
+RAG_BACKEND_PIPELINE_VARIANT=V5-live-fullchain
+RAG_BACKEND_CANDIDATE_RETRIEVER=lexical
+RAG_BACKEND_RERANK_RETRIEVER=lexical
+RAG_BACKEND_CANDIDATE_K=24
+RAG_BACKEND_RERANK_K=6
+RAG_BACKEND_MAX_STEPS=4
+RAG_LIVE_MAX_PAGES=8
+RAG_UPLOAD_MAX_MB=20
+```
+
+如需接入豆包视觉或答案生成，在 `.env` 中配置 `ARK_API_KEY`、模型名，并设置：
+
+```text
+RAG_BACKEND_VISUAL_CAPTION_PROVIDER=doubao
+RAG_ANSWER_PROVIDER=doubao
+RAG_BACKEND_ARK_VISION_MODEL=<your-vision-model>
+RAG_ANSWER_MODEL=<your-text-model>
+```
+
 ## 完整流程
 
 ### 1. 文档接入

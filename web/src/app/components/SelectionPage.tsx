@@ -28,7 +28,7 @@ const CHUNK_TEMPLATE_OPTIONS: { value: ChunkTemplate; label: string; icon: Lucid
   { value: 'general', label: '通用', icon: Layers3 },
   { value: 'ai', label: 'AI', icon: BrainCircuit },
   { value: 'math', label: '数学', icon: Calculator },
-  { value: 'finance', label: '金融', icon: Landmark },
+  { value: 'finance', label: '报表', icon: Landmark },
   { value: 'medical', label: '医学', icon: HeartPulse },
 ];
 
@@ -213,7 +213,7 @@ export function SelectionPage({ data, onStartAnalysis }: SelectionPageProps) {
               <p className="mt-1 font-semibold text-slate-950">{selectedPdfName}</p>
               {sourceMode === 'upload' && (
                 <p className="mt-2 text-sm text-cyan-700">
-                  论文领域：{CHUNK_TEMPLATE_OPTIONS.find((option) => option.value === selectedChunkTemplate)?.label}
+                  现场全链路模式：{CHUNK_TEMPLATE_OPTIONS.find((option) => option.value === selectedChunkTemplate)?.label}
                 </p>
               )}
             </div>
@@ -252,7 +252,7 @@ function ChunkTemplatePicker({
 }) {
   return (
     <div className="mb-5">
-      <div className="mb-2 text-sm font-medium text-slate-700">论文领域</div>
+      <div className="mb-2 text-sm font-medium text-slate-700">分析侧重</div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
         {CHUNK_TEMPLATE_OPTIONS.map((option) => {
           const Icon = option.icon;

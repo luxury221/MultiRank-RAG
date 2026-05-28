@@ -17,6 +17,7 @@ export interface QuestionItem {
   gold_pages: string[];
   gold_modalities: string[];
   evidence_note: string;
+  profile?: string;
   detail_url?: string;
   ranking_url?: string;
   pipeline_mode?: string;
@@ -162,6 +163,10 @@ export interface UploadJobStatus {
   pdf_name: string;
   question: string;
   chunk_template?: ChunkTemplate;
+  profile?: string;
+  live_profile?: number;
+  pdf_pages?: number;
+  file_size_mb?: number;
   pipeline_mode?: string;
   pipeline_variant?: string;
   effect_priority?: number;

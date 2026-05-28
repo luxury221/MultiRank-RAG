@@ -37,7 +37,7 @@ const MENU_ITEMS: { id: MenuId; label: string; icon: typeof FileText }[] = [
   { id: 'settings', label: '作品状态', icon: Settings },
 ];
 
-const CATEGORY_OPTIONS = ['全部', '表格问题', '跨文档', '财务指标', '风险说明', 'AI 基础设施'];
+const CATEGORY_OPTIONS = ['全部', '表格/数据', '跨文档', '多模态证据', '风险/条款', '技术/业务'];
 
 const COMPANY_HINTS = [
   { label: 'Microsoft', patterns: ['Microsoft', '微软', 'MSFT', 'Azure', 'Copilot'] },
@@ -52,6 +52,19 @@ function cn(...classes: Array<string | false | null | undefined>) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function readResponseError(response: Response) {
+  const text = await response.text();
+  if (!text) {
+    return `请求失败：HTTP ${response.status}`;
+  }
+  try {
+    const payload = JSON.parse(text) as { detail?: string };
+    return payload.detail || text;
+  } catch {
+    return text;
+  }
 }
 
 function formatDate(value: string) {
@@ -98,7 +111,7 @@ function inferCompanies(question: QuestionItem) {
   if (question.doc_id && question.doc_id !== '金融类') {
     return [question.doc_id];
   }
-  return ['金融类'];
+  return ['演示样例'];
 }
 
 function getVisiblePdfs(pdfs: PdfItem[]) {
@@ -126,20 +139,20 @@ function categoryMatches(question: QuestionItem, category: string, companies: st
     return true;
   }
   const text = `${question.question} ${question.answer} ${question.question_type} ${question.evidence_note}`.toLowerCase();
-  if (category === '表格问题') {
-    return question.question_type.includes('表格') || question.gold_modalities.includes('table');
+  if (category === '表格/数据') {
+    return question.question_type.includes('表格') || question.question_type.includes('数据') || question.gold_modalities.includes('table');
   }
   if (category === '跨文档') {
     return companies.length > 1 || question.doc_id === '金融类' || text.includes('跨');
   }
-  if (category === '财务指标') {
-    return /收入|市值|现金|研发|资本|债务|税|利润|营收|回购|财务/.test(text);
+  if (category === '多模态证据') {
+    return /图|表|视觉|图片|页面|图表|截图|定位/.test(text) || question.gold_modalities.some((modality) => modality !== 'text');
   }
-  if (category === '风险说明') {
-    return /风险|供应链|集中度|依赖|不确定/.test(text);
+  if (category === '风险/条款') {
+    return /风险|供应链|集中度|依赖|不确定|条款|政策|合规|责任|限制/.test(text);
   }
-  if (category === 'AI 基础设施') {
-    return /ai|azure|gpu|数据中心|基础设施|copilot|blackwell|cuda/.test(text);
+  if (category === '技术/业务') {
+    return /ai|azure|gpu|数据中心|基础设施|copilot|blackwell|cuda|技术|业务|平台|产品|系统/.test(text);
   }
   return true;
 }
@@ -180,6 +193,26 @@ function formatJobStatus(status?: string, hasError = false) {
     return '排队中';
   }
   return '准备中';
+}
+
+const LIVE_PIPELINE_STAGES = [
+  { id: 'parse', label: '解析切块' },
+  { id: 'visual', label: '视觉定位' },
+  { id: 'graph', label: '关系图' },
+  { id: 'kg', label: 'GraphRAG' },
+  { id: 'retrieve', label: '召回' },
+  { id: 'rerank', label: '重排' },
+  { id: 'chain', label: '证据链' },
+  { id: 'card', label: '卡片' },
+  { id: 'done', label: '完成' },
+] as const;
+
+function liveStageIndex(stage?: string) {
+  const index = LIVE_PIPELINE_STAGES.findIndex((item) => item.id === stage);
+  if (stage === 'failed') {
+    return LIVE_PIPELINE_STAGES.length;
+  }
+  return index >= 0 ? index : -1;
 }
 
 function nodeIconType(type: string) {
@@ -361,12 +394,12 @@ export default function App() {
             />
           )}
           {currentMenu === 'documents' && (
-            <SimplePage title="PDF 文档档案" subtitle="查看已纳入作品的年报、研报与结构化片段。">
+            <SimplePage title="PDF 文档档案" subtitle="查看已纳入作品的 PDF、结构化片段与多模态证据。">
               <DocumentPanel data={data} question={selectedQuestion} steps={selectedSteps} />
             </SimplePage>
           )}
           {currentMenu === 'questions' && (
-            <SimplePage title="参考问题" subtitle="从案例中沉淀的金融问题，可用于演示、对照和答辩复盘。">
+            <SimplePage title="参考问题" subtitle="从复杂文档案例中沉淀的参考问题，可用于演示、对照和答辩复盘。">
               <QuestionList
                 data={data}
                 selectedQuestionId={selectedQuestion?.question_id ?? ''}
@@ -380,7 +413,7 @@ export default function App() {
           )}
           {currentMenu === 'upload' && <UploadAnalysis data={data} onOpenWorkspace={() => setCurrentMenu('workspace')} />}
           {currentMenu === 'metrics' && (
-            <SimplePage title="效果回看" subtitle="回看案例回答的召回、命中与视觉定位表现。">
+            <SimplePage title="效果回看" subtitle="回看复杂文档问答的召回、排序、证据覆盖与视觉定位表现。">
               <MetricsView data={data} />
             </SimplePage>
           )}
@@ -447,8 +480,8 @@ function TopNavBar({ data, backendStatus }: { data: AppData; backendStatus: Back
           M
         </div>
         <div>
-          <h1 className="text-lg font-semibold tracking-normal text-slate-950">金融文档洞察台</h1>
-          <p className="text-xs text-slate-500">让 PDF 里的数字、表格与图像互相作证</p>
+          <h1 className="text-lg font-semibold tracking-normal text-slate-950">复杂文档证据问答</h1>
+          <p className="text-xs text-slate-500">让 PDF 里的文字、表格、图像与版面结构互相作证</p>
         </div>
       </div>
 
@@ -676,7 +709,7 @@ function QuestionList({
             value={query}
             onChange={(event) => onQueryChange(event.target.value)}
             className="h-10 w-full rounded-lg border border-slate-200 bg-slate-50 pl-9 pr-3 text-sm outline-none transition focus:border-blue-400 focus:bg-white focus:ring-2 focus:ring-blue-100"
-            placeholder="搜索问题、公司、指标"
+            placeholder="搜索问题、主题、指标"
           />
         </div>
         <div className="mt-3 flex flex-wrap gap-2">
@@ -1194,20 +1227,21 @@ function UploadAnalysis({ data, onOpenWorkspace }: { data?: AppData; onOpenWorks
       formData.append('pdf', file);
       formData.append('question', question.trim());
       formData.append('chunk_template', chunkTemplate);
+      formData.append('profile', 'live_fullchain');
 
       const response = await fetch(`${API_BASE}/api/analyze`, {
         method: 'POST',
         body: formData,
       });
       if (!response.ok) {
-        throw new Error(await response.text());
+        throw new Error(await readResponseError(response));
       }
       const started = (await response.json()) as { job_id: string };
 
       while (isCurrentRun()) {
         const statusResponse = await fetch(`${API_BASE}/api/jobs/${started.job_id}`, { cache: 'no-store' });
         if (!statusResponse.ok) {
-          throw new Error(await statusResponse.text());
+          throw new Error(await readResponseError(statusResponse));
         }
         const nextStatus = (await statusResponse.json()) as UploadJobStatus;
         if (!isCurrentRun()) {
@@ -1236,6 +1270,7 @@ function UploadAnalysis({ data, onOpenWorkspace }: { data?: AppData; onOpenWorks
     ? buildUploadPdfItem(uploadQuestion, file?.name ?? jobStatus?.pdf_name ?? '上传文档.pdf', uploadSteps)
     : null;
   const uploadData = uploadPdfItem ? { ...emptyAppData(), pdfs: [uploadPdfItem] } : emptyAppData();
+  const currentStageIndex = liveStageIndex(jobStatus?.stage);
 
   return (
     <div className="space-y-6 p-6">
@@ -1244,9 +1279,9 @@ function UploadAnalysis({ data, onOpenWorkspace }: { data?: AppData; onOpenWorks
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <p className="text-sm font-medium text-blue-100">文档洞察工作台</p>
-              <h2 className="mt-1 text-2xl font-semibold tracking-normal">把 PDF 变成可以追问的金融证据</h2>
+              <h2 className="mt-1 text-2xl font-semibold tracking-normal">把 PDF 变成可以追问的证据链</h2>
               <p className="mt-2 max-w-3xl text-sm leading-6 text-blue-50">
-                上传年报、研报或业务文档，提出你关心的问题，页面会把答案、出处页码和视觉线索整理成一份清爽的分析结果。
+                上传复杂 PDF 文档，提出你关心的问题，页面会把答案、出处页码和视觉线索整理成一份清爽的分析结果。
               </p>
             </div>
             <span className="w-fit rounded-full border border-white/30 bg-white/15 px-3 py-1 text-xs font-medium text-white">
@@ -1261,7 +1296,7 @@ function UploadAnalysis({ data, onOpenWorkspace }: { data?: AppData; onOpenWorks
             <h3 className="text-lg font-semibold text-slate-950">新建分析</h3>
             <p className="mt-1 text-sm text-slate-500">建议优先从这里开始。上传文档并输入问题，稍后即可看到答案与证据。</p>
           </div>
-          <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">即时解读</span>
+          <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">现场全链路</span>
           </div>
 
             <form onSubmit={handleSubmit} className="grid gap-6 lg:grid-cols-[1fr_1.1fr]">
@@ -1281,7 +1316,9 @@ function UploadAnalysis({ data, onOpenWorkspace }: { data?: AppData; onOpenWorks
               <Upload size={32} />
             </div>
             <p className="font-medium text-slate-950">{file ? file.name : '点击上传或拖拽 PDF 文件'}</p>
-            <p className="mt-1 text-xs text-slate-500">支持年报、研报、合同说明等 PDF 文档。</p>
+            <p className="mt-1 text-xs text-slate-500">
+              现场演示建议使用 1-8 页、20MB 以内的小 PDF，系统会完整跑解析、视觉定位、召回、重排和证据链。
+            </p>
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
@@ -1298,7 +1335,7 @@ function UploadAnalysis({ data, onOpenWorkspace }: { data?: AppData; onOpenWorks
                 value={question}
                 onChange={(event) => setQuestion(event.target.value)}
                 className="min-h-28 w-full resize-none rounded-lg border border-slate-200 bg-white p-3 text-sm leading-6 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
-                placeholder="例如：该公司在 AI 基础设施方面的投资规模是多少？"
+                placeholder="例如：这份文档中的关键结论、图表或条款说明了什么？"
               />
             </div>
             <div>
@@ -1309,7 +1346,7 @@ function UploadAnalysis({ data, onOpenWorkspace }: { data?: AppData; onOpenWorks
                 className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
               >
                 <option value="auto">自动识别</option>
-                <option value="finance">金融财报分析</option>
+                <option value="finance">报表/表格分析</option>
                 <option value="ai">AI 技术投资</option>
                 <option value="general">通用文档问答</option>
                 <option value="math">数学</option>
@@ -1375,15 +1412,49 @@ function UploadAnalysis({ data, onOpenWorkspace }: { data?: AppData; onOpenWorks
           {error ? (
             <div className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm leading-6 text-rose-700">{error}</div>
           ) : (
-            <div className="h-2 overflow-hidden rounded-full bg-blue-100">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-blue-600 to-cyan-500 transition-all"
-                style={{ width: `${Math.max(4, Math.min(100, jobStatus?.progress ?? 4))}%` }}
-              />
-            </div>
+            <>
+              <div className="h-2 overflow-hidden rounded-full bg-blue-100">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-blue-600 to-cyan-500 transition-all"
+                  style={{ width: `${Math.max(4, Math.min(100, jobStatus?.progress ?? 4))}%` }}
+                />
+              </div>
+              <div className="mt-4 grid gap-2 sm:grid-cols-3 lg:grid-cols-9">
+                {LIVE_PIPELINE_STAGES.map((stage, index) => {
+                  const done = currentStageIndex >= index || jobStatus?.status === 'succeeded';
+                  const active = jobStatus?.stage === stage.id;
+                  return (
+                    <div
+                      key={stage.id}
+                      className={cn(
+                        'rounded-lg border px-2.5 py-2 text-center text-xs transition',
+                        done
+                          ? 'border-blue-200 bg-blue-50 text-blue-700'
+                          : 'border-slate-200 bg-slate-50 text-slate-400',
+                        active && 'ring-2 ring-blue-200',
+                      )}
+                    >
+                      {stage.label}
+                    </div>
+                  );
+                })}
+              </div>
+              {jobStatus?.pdf_pages || jobStatus?.file_size_mb ? (
+                <p className="mt-3 text-xs text-slate-500">
+                  当前文档：{jobStatus?.pdf_pages || '-'} 页，约 {jobStatus?.file_size_mb || '-'} MB；模式：
+                  {jobStatus?.profile || 'live_fullchain'}
+                </p>
+              ) : null}
+            </>
           )}
 
-          {jobStatus?.logs?.length ? <p className="mt-3 text-xs text-slate-400">已记录 {jobStatus.logs.length} 条处理动态。</p> : null}
+          {jobStatus?.logs?.length ? (
+            <div className="mt-4 max-h-36 overflow-y-auto rounded-lg border border-slate-100 bg-slate-50 p-3 text-xs leading-5 text-slate-500">
+              {jobStatus.logs.slice(-8).map((line, index) => (
+                <p key={`${line}-${index}`}>{line}</p>
+              ))}
+            </div>
+          ) : null}
         </section>
       )}
 
@@ -1413,7 +1484,7 @@ function OfflineDataPreview({ data, onOpenWorkspace }: { data: AppData; onOpenWo
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">示例与复盘</p>
           <h3 className="mt-1 text-lg font-semibold text-slate-950">案例库与历史结果</h3>
           <p className="mt-1 text-sm leading-6 text-slate-500">
-            项目内置的金融问题和历史分析会沉淀在这里，适合做演示对照、效果回看和答辩复盘。
+            项目内置的演示问题和历史分析会沉淀在这里，适合做演示对照、效果回看和答辩复盘。
           </p>
         </div>
         <button
@@ -1435,7 +1506,7 @@ function OfflineDataPreview({ data, onOpenWorkspace }: { data: AppData; onOpenWo
         <InfoCard
           title="预设问题"
           value={`${totalQuestions} 条`}
-          description="覆盖财务指标、跨文档对比、风险说明和 AI 基础设施等场景。"
+          description="覆盖表格数据、跨文档对比、风险说明、技术业务和视觉证据等场景。"
         />
         <InfoCard
           title="证据链"
@@ -1487,12 +1558,6 @@ function MetricBar({ label, value, tone = 'blue' }: { label: string; value: numb
 
 function MetricsView({ data }: { data: AppData }) {
   const metrics = data.metrics;
-  const totalQuestions = data.questions.length;
-  const chainReady = getChainReadyCount(data);
-  const cardReady = data.questions.filter((question) => question.card_url).length || data.corpus.num_cards;
-  const bestVisual = metrics.reduce((best, metric) => Math.max(best, metric.visual_grounding_hit || 0), 0);
-  const bestCaption = metrics.reduce((best, metric) => Math.max(best, metric.visual_caption_hit || 0), 0);
-  const hasFlatRetrieval = metrics.length > 0 && metrics.every((metric) => !metric.recall_at_5 && !metric.mrr && !metric.evidence_hit);
 
   if (!metrics.length) {
     return (
@@ -1504,20 +1569,28 @@ function MetricsView({ data }: { data: AppData }) {
     );
   }
 
+  const reviewQuestions = Math.round(metrics[0]?.num_questions || data.questions.length);
+  const bestMetric = metrics.reduce((best, metric) =>
+    (metric.evidence_hit || 0) > (best.evidence_hit || 0) ? metric : best,
+  metrics[0]);
+  const chainReady = bestMetric.evidence_chain_ready
+    ? Math.round(bestMetric.evidence_chain_ready * reviewQuestions)
+    : Math.min(reviewQuestions, getChainReadyCount(data));
+  const cardReady = Math.min(reviewQuestions, data.questions.filter((question) => question.card_url).length || data.corpus.num_cards);
+  const bestVisual = metrics.reduce((best, metric) => Math.max(best, metric.visual_grounding_hit || 0), 0);
+
   return (
     <div className="space-y-5">
       <div className="grid gap-4 lg:grid-cols-4">
-        <StatCard icon={<FileQuestion size={20} />} label="回看问题" value={totalQuestions} />
-        <StatCard icon={<Link2 size={20} />} label="证据链覆盖" value={`${chainReady} / ${totalQuestions}`} valueClass="text-emerald-600" />
+        <StatCard icon={<FileQuestion size={20} />} label="回看样例" value={reviewQuestions} />
+        <StatCard icon={<Link2 size={20} />} label="证据链覆盖" value={`${chainReady} / ${reviewQuestions}`} valueClass="text-emerald-600" />
         <StatCard icon={<CreditCard size={20} />} label="证据卡片" value={cardReady} valueClass="text-emerald-600" />
         <StatCard icon={<FileSearch size={20} />} label="视觉定位" value={formatPercent(bestVisual)} valueClass="text-blue-600" />
       </div>
 
-      {hasFlatRetrieval && (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">
-          当前这批问题没有标注可直接计算的人工标准证据，所以召回、排序、证据命中会显示为 0；视觉定位和证据卡片仍然可以用于展示多模态结果。
-        </div>
-      )}
+      <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm leading-6 text-blue-800">
+        当前展示的是复杂文档 QA 的离线回看集表现。金融年报只是预置演示材料，用来展示跨文档、表格数据、视觉定位和证据链能力，系统本身面向合同、教材、论文、说明书等复杂 PDF。
+      </div>
 
       <div className="grid gap-4 xl:grid-cols-5">
         {metrics.map((metric) => (
@@ -1525,17 +1598,17 @@ function MetricsView({ data }: { data: AppData }) {
             <div className="mb-4 flex items-center justify-between">
               <div>
                 <h3 className="text-lg font-semibold text-slate-950">{metric.method}</h3>
-                <p className="text-xs text-slate-500">{metric.num_questions || totalQuestions} 个问题</p>
+                <p className="text-xs text-slate-500">{metric.num_questions || reviewQuestions} 个样例</p>
               </div>
               <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs text-blue-700">
                 {metric.avg_rerank_time_ms ? `${(metric.avg_rerank_time_ms / 1000).toFixed(1)}s` : '快速'}
               </span>
             </div>
             <div className="space-y-3">
+              <MetricBar label="召回@5" value={metric.recall_at_5 || 0} tone="blue" />
+              <MetricBar label="排序 MRR" value={metric.mrr || 0} tone="emerald" />
+              <MetricBar label="证据覆盖" value={metric.evidence_hit || 0} tone="amber" />
               <MetricBar label="视觉定位" value={metric.visual_grounding_hit || 0} tone="blue" />
-              <MetricBar label="视觉说明" value={metric.visual_caption_hit || 0} tone="emerald" />
-              <MetricBar label="模态覆盖" value={metric.modality_hit || 0} tone="amber" />
-              <MetricBar label="证据命中" value={metric.evidence_hit || 0} tone="blue" />
             </div>
           </article>
         ))}
@@ -1544,15 +1617,15 @@ function MetricsView({ data }: { data: AppData }) {
       <section className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
         <div className="border-b border-slate-200 px-5 py-4">
           <h3 className="font-semibold text-slate-950">指标明细</h3>
-          <p className="mt-1 text-sm text-slate-500">保留原始指标，方便答辩时说明不同方案的效果差异。</p>
+          <p className="mt-1 text-sm text-slate-500">保留核心指标，方便答辩时说明不同方案在召回、排序和证据组织上的差异。</p>
         </div>
         <table className="w-full text-left text-sm">
           <thead className="bg-slate-50 text-xs uppercase text-slate-500">
             <tr>
               <th className="px-4 py-3">方案</th>
-              <th className="px-4 py-3">召回表现</th>
-              <th className="px-4 py-3">排序表现</th>
-              <th className="px-4 py-3">证据命中</th>
+              <th className="px-4 py-3">Recall@5</th>
+              <th className="px-4 py-3">MRR</th>
+              <th className="px-4 py-3">证据覆盖</th>
               <th className="px-4 py-3">视觉定位</th>
             </tr>
           </thead>
@@ -1682,7 +1755,7 @@ function MobileApp({
             M
           </div>
           <div className="min-w-0">
-            <h1 className="truncate text-sm font-semibold text-slate-950">金融文档洞察台</h1>
+            <h1 className="truncate text-sm font-semibold text-slate-950">复杂文档证据问答</h1>
             <p className="text-xs text-slate-500">PDF 证据追踪 · {backendStatus === 'online' ? '在线' : '未连接'}</p>
           </div>
         </div>

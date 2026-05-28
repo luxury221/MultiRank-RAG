@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from backend.config import ROOT, SCRIPTS_DIR, env_value
+from backend.config import ROOT, SCRIPTS_DIR, env_int, env_value
 from backend.jobs.store import append_log
 
 from multirank_rag.common import clean_text, preview
@@ -147,7 +147,7 @@ def build_kg_index_for_backend(job_id: str, job: Path, nodes_path: Path, edges_p
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=180,
+            timeout=env_int("RAG_BACKEND_KG_TIMEOUT", 60),
         )
     except Exception as exc:
         append_log(job_id, f"GraphRAG build failed: {exc}")

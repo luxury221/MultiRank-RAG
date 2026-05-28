@@ -29,7 +29,9 @@ def write_status(job_id: str, **updates: Any) -> dict[str, Any]:
         status.setdefault("job_id", job_id)
         status.update(updates)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
+        tmp_path.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(path)
         return status
 
 
@@ -37,7 +39,8 @@ def read_status(job_id: str) -> dict[str, Any]:
     path = job_dir(job_id) / "status.json"
     if not path.exists():
         raise HTTPException(status_code=404, detail="Job not found")
-    return json.loads(path.read_text(encoding="utf-8"))
+    with JOBS_LOCK:
+        return json.loads(path.read_text(encoding="utf-8"))
 
 
 def append_log(job_id: str, message: str) -> None:

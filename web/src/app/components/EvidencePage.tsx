@@ -74,6 +74,19 @@ function sleep(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+async function readResponseError(response: Response) {
+  const text = await response.text();
+  if (!text) {
+    return `请求失败：HTTP ${response.status}`;
+  }
+  try {
+    const payload = JSON.parse(text) as { detail?: string };
+    return payload.detail || text;
+  } catch {
+    return text;
+  }
+}
+
 export function EvidencePage({ data, question, request, onBack }: EvidencePageProps) {
   const uploadRequest = request?.mode === 'upload' ? request : null;
   const [jobStatus, setJobStatus] = useState<UploadJobStatus | null>(null);
@@ -95,20 +108,21 @@ export function EvidencePage({ data, question, request, onBack }: EvidencePagePr
         formData.append('pdf', uploadRequest.file);
         formData.append('question', uploadRequest.question);
         formData.append('chunk_template', uploadRequest.chunk_template);
+        formData.append('profile', 'live_fullchain');
 
         const response = await fetch(`${API_BASE}/api/analyze`, {
           method: 'POST',
           body: formData,
         });
         if (!response.ok) {
-          throw new Error(await response.text());
+          throw new Error(await readResponseError(response));
         }
         const started = (await response.json()) as { job_id: string };
 
         while (!cancelled) {
           const statusResponse = await fetch(`${API_BASE}/api/jobs/${started.job_id}`, { cache: 'no-store' });
           if (!statusResponse.ok) {
-            throw new Error(await statusResponse.text());
+            throw new Error(await readResponseError(statusResponse));
           }
           const nextStatus = (await statusResponse.json()) as UploadJobStatus;
           setJobStatus(nextStatus);
